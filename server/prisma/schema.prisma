@@ -1,0 +1,327 @@
+// ============================================================================
+// e-Office Management System — Database Schema (Phase 1 + Phase 2)
+// Phase 1: Authentication, RBAC, Departments, Tasks, Assignment,
+//          Sub-assignment, Task Movement History, Comments, Attachments.
+// Phase 2: Leave Management, generic Attachments (Documents), Notifications,
+//          system-wide Audit Log.
+//
+// Still not built: e-Files module. See README "Roadmap" section.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Auth & Org structure
+// ----------------------------------------------------------------------------
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  STAFF
+}
+
+enum AccountStatus {
+  ACTIVE
+  DISABLED
+}
+
+model Department {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  parentId  String?
+  parent    Department?  @relation("DeptHierarchy", fields: [parentId], references: [id])
+  children  Department[] @relation("DeptHierarchy")
+  users     User[]
+  createdAt DateTime @default(now())
+}
+
+model User {
+  id             String        @id @default(cuid())
+  name           String
+  email          String        @unique
+  passwordHash   String
+  designation    String?
+  phone          String?
+  role           Role          @default(STAFF)
+  status         AccountStatus @default(ACTIVE)
+  canSubAssign   Boolean       @default(false)
+  departmentId   String?
+  department     Department?   @relation(fields: [departmentId], references: [id])
+
+  createdTasks     Task[]           @relation("TaskCreatedBy")
+  assignedTasks    TaskAssignment[] @relation("AssignedTo")
+  givenAssignments TaskAssignment[] @relation("AssignedBy")
+  movements        TaskMovement[]   @relation("MovementActor")
+  comments         TaskComment[]
+  attachments      Attachment[]
+
+  leaveRequests    LeaveRequest[]   @relation("LeaveRequester")
+  leaveReviews     LeaveRequest[]   @relation("LeaveReviewer")
+  notifications    Notification[]
+  auditLogs        AuditLog[]
+
+  passwordResetToken   String?
+  passwordResetExpires DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([departmentId])
+}
+
+// ----------------------------------------------------------------------------
+// Tasks
+// ----------------------------------------------------------------------------
+
+enum TaskPriority {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum TaskStatus {
+  NEW
+  ASSIGNED
+  ACKNOWLEDGED
+  IN_PROGRESS
+  PENDING
+  SUBMITTED
+  UNDER_REVIEW
+  RETURNED
+  COMPLETED
+  CLOSED
+}
+
+model Task {
+  id          String       @id @default(cuid())
+  fileId      String       @unique // human-readable Task/File ID, e.g. TASK-2026-0001
+  subject     String
+  description String?
+  priority    TaskPriority @default(MEDIUM)
+  status      TaskStatus   @default(NEW)
+
+  createdById String
+  createdBy   User   @relation("TaskCreatedBy", fields: [createdById], references: [id])
+
+  parentTaskId String?
+  parentTask   Task?   @relation("TaskSubtasks", fields: [parentTaskId], references: [id])
+  subTasks     Task[]  @relation("TaskSubtasks")
+
+  dueDate        DateTime?
+  completionDate DateTime?
+
+  assignments TaskAssignment[]
+  movements   TaskMovement[]
+  comments    TaskComment[]
+  attachments Attachment[]
+  notifications Notification[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([priority])
+  @@index([dueDate])
+  @@index([parentTaskId])
+}
+
+// Represents the current + historical assignment chain for a task.
+// A new row is created every time a task is assigned or sub-assigned;
+// `active=true` marks the currently responsible assignment(s).
+model TaskAssignment {
+  id           String   @id @default(cuid())
+  taskId       String
+  task         Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  assignedToId String
+  assignedTo   User     @relation("AssignedTo", fields: [assignedToId], references: [id])
+
+  assignedById String
+  assignedBy   User     @relation("AssignedBy", fields: [assignedById], references: [id])
+
+  instructions String?
+  dueDate      DateTime?
+  isSubAssignment Boolean @default(false)
+  active       Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+  @@index([assignedToId])
+}
+
+// Immutable, append-only movement/audit trail for a task. Never updated
+// or deleted by application code — only inserted.
+model TaskMovement {
+  id            String     @id @default(cuid())
+  taskId        String
+  task          Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  actorId       String
+  actor         User       @relation("MovementActor", fields: [actorId], references: [id])
+
+  action        String     // e.g. "CREATED", "ASSIGNED", "ACKNOWLEDGED", "SUB_ASSIGNED",
+                            // "STATUS_CHANGE", "SUBMITTED", "RETURNED", "APPROVED", "CLOSED"
+  previousStatus TaskStatus?
+  newStatus      TaskStatus?
+  remarks        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([taskId, createdAt])
+}
+
+model TaskComment {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+}
+
+// Generic attachment — belongs to EITHER a Task OR a LeaveRequest (exactly
+// one of taskId / leaveRequestId is set; enforced in application code since
+// Prisma/Postgres don't express an XOR constraint declaratively here).
+model Attachment {
+  id         String   @id @default(cuid())
+
+  taskId     String?
+  task       Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  leaveRequestId String?
+  leaveRequest   LeaveRequest? @relation(fields: [leaveRequestId], references: [id])
+
+  uploadedById String
+  uploadedBy User     @relation(fields: [uploadedById], references: [id])
+
+  fileName   String
+  filePath   String   // storage path/key
+  fileType   String
+  fileSize   Int      // bytes
+
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+  @@index([leaveRequestId])
+}
+
+// ----------------------------------------------------------------------------
+// Leave Management
+// ----------------------------------------------------------------------------
+
+enum LeaveType {
+  CASUAL
+  SICK
+  EARNED
+  UNPAID
+  OTHER
+}
+
+enum LeaveStatus {
+  APPLIED
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model LeaveRequest {
+  id       String      @id @default(cuid())
+  userId   String
+  user     User        @relation("LeaveRequester", fields: [userId], references: [id])
+
+  leaveType LeaveType
+  fromDate  DateTime
+  toDate    DateTime
+  days      Int
+  reason    String
+
+  status         LeaveStatus @default(PENDING_APPROVAL)
+  reviewedById   String?
+  reviewedBy     User?       @relation("LeaveReviewer", fields: [reviewedById], references: [id])
+  reviewRemarks  String?
+  reviewedAt     DateTime?
+
+  attachments Attachment[]
+  notifications Notification[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([fromDate, toDate])
+}
+
+// ----------------------------------------------------------------------------
+// Notifications
+// ----------------------------------------------------------------------------
+
+enum NotificationType {
+  TASK_ASSIGNED
+  TASK_SUB_ASSIGNED
+  TASK_DEADLINE_APPROACHING
+  TASK_OVERDUE
+  TASK_RETURNED
+  TASK_APPROVED
+  LEAVE_APPLIED
+  LEAVE_APPROVED
+  LEAVE_REJECTED
+  INSTRUCTION_ISSUED
+}
+
+model Notification {
+  id     String           @id @default(cuid())
+  userId String
+  user   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    NotificationType
+  title   String
+  message String
+
+  taskId String?
+  task   Task?   @relation(fields: [taskId], references: [id])
+
+  leaveRequestId String?
+  leaveRequest   LeaveRequest? @relation(fields: [leaveRequestId], references: [id])
+
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, read])
+  @@index([createdAt])
+}
+
+// ----------------------------------------------------------------------------
+// Audit Log — system-wide, immutable, append-only
+// ----------------------------------------------------------------------------
+
+model AuditLog {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  action     String  // e.g. LOGIN, LOGOUT, TASK_CREATED, USER_CREATED, FILE_DOWNLOADED...
+  entityType String? // e.g. "Task", "User", "LeaveRequest"
+  entityId   String?
+  details    String?
+  ipAddress  String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}

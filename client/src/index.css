@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    @apply bg-bg text-navy-900;
+  }
+  :focus-visible {
+    @apply outline outline-2 outline-offset-2 outline-navy-400;
+  }
+}
+
+@layer components {
+  /* The "stamped registry number" treatment — the page's signature element.
+     Used for Task/File IDs so they read like an official file reference. */
+  .file-stamp {
+    @apply inline-flex items-center gap-1 rounded-[3px] border border-navy-400/40
+      bg-navy-50 px-2 py-0.5 font-mono text-[12px] font-medium tracking-wide text-navy-700;
+  }
+
+  .card {
+    @apply rounded-lg border border-border2 bg-white shadow-sm;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium
+      transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-navy-700 text-white hover:bg-navy-600;
+  }
+  .btn-secondary {
+    @apply btn border border-border2 bg-white text-navy-700 hover:bg-navy-50;
+  }
+  .btn-danger {
+    @apply btn bg-danger-500 text-white hover:opacity-90;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-border2 bg-white px-3 py-2 text-sm
+      placeholder:text-slate2-500 focus:border-navy-400 focus:outline-none;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-slate2-600;
+  }
+}
