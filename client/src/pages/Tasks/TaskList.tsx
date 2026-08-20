@@ -83,7 +83,6 @@ export function TaskList() {
             <button className="btn-secondary" onClick={() => updateParam('scope', '')}>
               Clear scope
             </button>
-          )}
         </div>
           <Link to="/tasks/new" className="btn-primary">
             + New Task
