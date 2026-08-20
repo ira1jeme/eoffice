@@ -22,7 +22,7 @@ export function createApp() {
   app.use(helmet());
   app.use(
     cors({
-      origin: process.env.CLIENT_ORIGIN || 'https://playful-lokum-769a43.netlify.app',
+      origin: process.env.CLIENT_ORIGIN || 'https://silchar-internalstaffs.netlify.app',
       credentials: true,
     }),
   );
