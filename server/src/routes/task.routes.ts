@@ -18,7 +18,7 @@ router.use(requireAuth);
 router.get('/', listTasks);
 router.get('/pending-monitor', requireRole('SUPER_ADMIN', 'ADMIN'), pendingMonitor);
 router.get('/:id', getTask);
-router.post('/', requireRole('SUPER_ADMIN', 'ADMIN'), createTask);
+router.post('/', createTask);
 router.post('/:id/assign', requireRole('SUPER_ADMIN', 'ADMIN'), assignTask);
 router.post('/:id/sub-assign', subAssignTask); // permission checked inside (canSubAssign)
 router.post('/:id/status', updateTaskStatus);
