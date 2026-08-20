@@ -24,7 +24,6 @@ export function TaskList() {
   const scope = params.get('scope') ?? '';
   const status = params.get('status') ?? '';
   const priority = params.get('priority') ?? '';
-  const isAdmin = user?.role === 'ADMIN' || user?.role === 'SUPER_ADMIN';
 
   useEffect(() => {
     let cancelled = false;
@@ -86,7 +85,6 @@ export function TaskList() {
             </button>
           )}
         </div>
-        {isAdmin && (
           <Link to="/tasks/new" className="btn-primary">
             + New Task
           </Link>
