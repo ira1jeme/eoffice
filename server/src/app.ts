@@ -20,7 +20,7 @@ export function createApp() {
   app.use(helmet());
   app.use(
     cors({
-      origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+      origin: process.env.CLIENT_ORIGIN || 'https://playful-lokum-769a43.netlify.app',
       credentials: true,
     }),
   );
