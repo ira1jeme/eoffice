@@ -5,16 +5,23 @@ import { api } from '../../api/client';
 import { TaskListItem, TaskPriority, TaskStatus } from '../../types';
 import { StatusBadge } from '../../components/Tasks/StatusBadge';
 import { PriorityTag } from '../../components/Tasks/PriorityTag';
-import { useAuth } from '../../context/AuthContext';
 
 const STATUSES: TaskStatus[] = [
-  'NEW', 'ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING',
-  'SUBMITTED', 'UNDER_REVIEW', 'RETURNED', 'COMPLETED', 'CLOSED',
+  'NEW',
+  'ASSIGNED',
+  'ACKNOWLEDGED',
+  'IN_PROGRESS',
+  'PENDING',
+  'SUBMITTED',
+  'UNDER_REVIEW',
+  'RETURNED',
+  'COMPLETED',
+  'CLOSED',
 ];
+
 const PRIORITIES: TaskPriority[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
 
 export function TaskList() {
-  const { user } = useAuth();
   const [params, setParams] = useSearchParams();
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -27,8 +34,10 @@ export function TaskList() {
 
   useEffect(() => {
     let cancelled = false;
+
     async function load() {
       setLoading(true);
+
       const res = await api.get('/tasks', {
         params: {
           scope: scope || undefined,
@@ -38,12 +47,16 @@ export function TaskList() {
           pageSize: 50,
         },
       });
+
       if (cancelled) return;
+
       setTasks(res.data.tasks);
       setTotal(res.data.pagination.total);
       setLoading(false);
     }
+
     load();
+
     return () => {
       cancelled = true;
     };
@@ -51,8 +64,13 @@ export function TaskList() {
 
   function updateParam(key: string, value: string) {
     const next = new URLSearchParams(params);
-    if (value) next.set(key, value);
-    else next.delete(key);
+
+    if (value) {
+      next.set(key, value);
+    } else {
+      next.delete(key);
+    }
+
     setParams(next);
   }
 
@@ -65,31 +83,52 @@ export function TaskList() {
             placeholder="Search Task ID, subject…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && updateParam('search', search)}
+            onKeyDown={(e) =>
+              e.key === 'Enter' && updateParam('search', search)
+            }
           />
-          <select className="input w-auto" value={status} onChange={(e) => updateParam('status', e.target.value)}>
-            <option value="">All statuses</option>
-            {STATUSES.map((s) => (
-              <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
-            ))}
-          </select>
-          <select className="input w-auto" value={priority} onChange={(e) => updateParam('priority', e.target.value)}>
-            <option value="">All priorities</option>
-            {PRIORITIES.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
-{scope && (
-  <button className="btn-secondary" onClick={() => updateParam('scope', '')}>
-    Clear scope
-  </button>
-)}
-</div>
 
-<Link to="/tasks/new" className="btn-primary">
-  + New Task
-</Link>
-        )}
+          <select
+            className="input w-auto"
+            value={status}
+            onChange={(e) => updateParam('status', e.target.value)}
+          >
+            <option value="">All statuses</option>
+
+            {STATUSES.map((s) => (
+              <option key={s} value={s}>
+                {s.replace(/_/g, ' ')}
+              </option>
+            ))}
+          </select>
+
+          <select
+            className="input w-auto"
+            value={priority}
+            onChange={(e) => updateParam('priority', e.target.value)}
+          >
+            <option value="">All priorities</option>
+
+            {PRIORITIES.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+
+          {scope && (
+            <button
+              className="btn-secondary"
+              onClick={() => updateParam('scope', '')}
+            >
+              Clear scope
+            </button>
+          )}
+        </div>
+
+        <Link to="/tasks/new" className="btn-primary">
+          + New Task
+        </Link>
       </div>
 
       <div className="card overflow-hidden">
@@ -104,40 +143,92 @@ export function TaskList() {
               <th className="px-4 py-2.5 font-medium">Pending</th>
             </tr>
           </thead>
+
           <tbody>
             {loading && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-slate2-500">Loading…</td></tr>
+              <tr>
+                <td
+                  colSpan={6}
+                  className="px-4 py-8 text-center text-slate2-500"
+                >
+                  Loading…
+                </td>
+              </tr>
             )}
+
             {!loading && tasks.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-slate2-500">No tasks match these filters.</td></tr>
+              <tr>
+                <td
+                  colSpan={6}
+                  className="px-4 py-8 text-center text-slate2-500"
+                >
+                  No tasks match these filters.
+                </td>
+              </tr>
             )}
+
             {tasks.map((t) => {
-              const overdue = t.dueDate && new Date(t.dueDate) < new Date() && !['COMPLETED', 'CLOSED'].includes(t.status);
+              const overdue =
+                t.dueDate &&
+                new Date(t.dueDate) < new Date() &&
+                !['COMPLETED', 'CLOSED'].includes(t.status);
+
               return (
-                <tr key={t.id} className="border-b border-border2 last:border-0 hover:bg-navy-50/50">
+                <tr
+                  key={t.id}
+                  className="border-b border-border2 last:border-0 hover:bg-navy-50/50"
+                >
                   <td className="px-4 py-2.5">
-                    <Link to={`/tasks/${t.id}`} className="hover:underline">
-                      <span className="file-stamp mr-2">{t.fileId}</span>
+                    <Link
+                      to={`/tasks/${t.id}`}
+                      className="hover:underline"
+                    >
+                      <span className="file-stamp mr-2">
+                        {t.fileId}
+                      </span>
                       {t.subject}
                     </Link>
                   </td>
+
                   <td className="px-4 py-2.5 text-slate2-600">
                     {t.assignments[0]?.assignedTo.name ?? '—'}
                   </td>
-                  <td className="px-4 py-2.5"><PriorityTag priority={t.priority} /></td>
-                  <td className={`px-4 py-2.5 ${overdue ? 'font-medium text-danger-500' : 'text-slate2-600'}`}>
-                    {t.dueDate ? format(new Date(t.dueDate), 'dd MMM yyyy') : '—'}
+
+                  <td className="px-4 py-2.5">
+                    <PriorityTag priority={t.priority} />
+                  </td>
+
+                  <td
+                    className={`px-4 py-2.5 ${
+                      overdue
+                        ? 'font-medium text-danger-500'
+                        : 'text-slate2-600'
+                    }`}
+                  >
+                    {t.dueDate
+                      ? format(new Date(t.dueDate), 'dd MMM yyyy')
+                      : '—'}
+
                     {overdue ? ' (overdue)' : ''}
                   </td>
-                  <td className="px-4 py-2.5"><StatusBadge status={t.status} /></td>
-                  <td className="px-4 py-2.5 text-slate2-600">{t.pendingDays}d</td>
+
+                  <td className="px-4 py-2.5">
+                    <StatusBadge status={t.status} />
+                  </td>
+
+                  <td className="px-4 py-2.5 text-slate2-600">
+                    {t.pendingDays}d
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-slate2-500">{total} task(s) found.</p>
+
+      <p className="text-xs text-slate2-500">
+        {total} task(s) found.
+      </p>
     </div>
   );
 }
