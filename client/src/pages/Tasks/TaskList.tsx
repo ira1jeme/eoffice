@@ -79,14 +79,16 @@ export function TaskList() {
               <option key={p} value={p}>{p}</option>
             ))}
           </select>
-          {scope && (
-            <button className="btn-secondary" onClick={() => updateParam('scope', '')}>
-              Clear scope
-            </button>
-        </div>
-          <Link to="/tasks/new" className="btn-primary">
-            + New Task
-          </Link>
+{scope && (
+  <button className="btn-secondary" onClick={() => updateParam('scope', '')}>
+    Clear scope
+  </button>
+)}
+</div>
+
+<Link to="/tasks/new" className="btn-primary">
+  + New Task
+</Link>
         )}
       </div>
 
