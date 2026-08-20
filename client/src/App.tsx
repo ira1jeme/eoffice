@@ -31,9 +31,7 @@ export default function App() {
             <Route
               path="/tasks/new"
               element={
-                <ProtectedRoute roles={['ADMIN', 'SUPER_ADMIN']}>
                   <TaskCreate />
-                </ProtectedRoute>
               }
             />
             <Route path="/tasks/:id" element={<TaskDetail />} />
