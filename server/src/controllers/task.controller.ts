@@ -100,89 +100,369 @@ const listQuerySchema = z.object({
   search: z.string().optional(),
   dueFrom: z.string().datetime().optional(),
   dueTo: z.string().datetime().optional(),
-  // scope: mine (assigned to me) | createdByMe | subAssignedByMe | all
-  scope: z.enum(['mine', 'createdByMe', 'subAssignedByMe', 'all']).optional(),
+
+  // Available scopes:
+  // mine            = all tasks assigned to me
+  // pendingWithMe   = tasks currently pending with me,
+  //                   excluding tasks I have sub-assigned
+  // createdByMe     = tasks created by me
+  // subAssignedByMe = tasks I have sub-assigned
+  // all             = all accessible tasks
+  scope: z
+    .enum([
+      'mine',
+      'pendingWithMe',
+      'createdByMe',
+      'subAssignedByMe',
+      'all',
+    ])
+    .optional(),
+
   page: z.coerce.number().min(1).default(1),
   pageSize: z.coerce.number().min(1).max(100).default(20),
 });
 
 export async function listTasks(req: AuthedRequest, res: Response) {
   const q = listQuerySchema.parse(req.query);
-  const { userId, role, departmentId: myDeptId } = req.user!;
+  const {
+    userId,
+    role,
+    departmentId: myDeptId,
+  } = req.user!;
 
   const where: Prisma.TaskWhereInput = {};
 
-  if (q.status) where.status = q.status;
-  if (q.priority) where.priority = q.priority;
+  // --------------------------------------------------------------------------
+  // STATUS FILTER
+  // --------------------------------------------------------------------------
+
+  if (q.status) {
+    where.status = q.status;
+  }
+
+  // --------------------------------------------------------------------------
+  // PRIORITY FILTER
+  // --------------------------------------------------------------------------
+
+  if (q.priority) {
+    where.priority = q.priority;
+  }
+
+  // --------------------------------------------------------------------------
+  // DUE DATE FILTER
+  // --------------------------------------------------------------------------
+
   if (q.dueFrom || q.dueTo) {
     where.dueDate = {
-      ...(q.dueFrom ? { gte: new Date(q.dueFrom) } : {}),
-      ...(q.dueTo ? { lte: new Date(q.dueTo) } : {}),
+      ...(q.dueFrom
+        ? {
+            gte: new Date(q.dueFrom),
+          }
+        : {}),
+      ...(q.dueTo
+        ? {
+            lte: new Date(q.dueTo),
+          }
+        : {}),
     };
   }
+
+  // --------------------------------------------------------------------------
+  // SEARCH
+  // --------------------------------------------------------------------------
+
   if (q.search) {
     where.OR = [
-      { subject: { contains: q.search, mode: 'insensitive' } },
-      { fileId: { contains: q.search, mode: 'insensitive' } },
-      { description: { contains: q.search, mode: 'insensitive' } },
+      {
+        subject: {
+          contains: q.search,
+          mode: 'insensitive',
+        },
+      },
+      {
+        fileId: {
+          contains: q.search,
+          mode: 'insensitive',
+        },
+      },
+      {
+        description: {
+          contains: q.search,
+          mode: 'insensitive',
+        },
+      },
     ];
   }
+
+  // --------------------------------------------------------------------------
+  // ASSIGNED TO FILTER
+  // --------------------------------------------------------------------------
 
   if (q.assignedToId) {
-    where.assignments = { some: { assignedToId: q.assignedToId, active: true } };
+    where.assignments = {
+      some: {
+        assignedToId: q.assignedToId,
+        active: true,
+      },
+    };
   }
 
+  // --------------------------------------------------------------------------
+  // SCOPE FILTERS
+  // --------------------------------------------------------------------------
+
   if (q.scope === 'mine') {
-    where.assignments = { some: { assignedToId: userId, active: true } };
-  } else if (q.scope === 'createdByMe') {
-    where.createdById = userId;
-  } else if (q.scope === 'subAssignedByMe') {
-    where.assignments = { some: { assignedById: userId, isSubAssignment: true } };
-  } else if (!isAdminOrAbove(role) && q.scope !== 'all') {
-    // Staff without an explicit scope only see tasks touching them.
-    where.OR = [
-      ...(where.OR ?? []),
-      { assignments: { some: { assignedToId: userId } } },
-      { createdById: userId },
+    // --------------------------------------------------
+    // MY TASKS
+    // Includes every active task assigned to me,
+    // including tasks that I may have sub-assigned.
+    // --------------------------------------------------
+
+    where.assignments = {
+      some: {
+        assignedToId: userId,
+        active: true,
+      },
+    };
+  }
+
+  else if (q.scope === 'pendingWithMe') {
+    // --------------------------------------------------
+    // PENDING WITH ME
+    //
+    // Conditions:
+    // 1. Task must be actively assigned to me.
+    // 2. Task must NOT be COMPLETED or CLOSED.
+    // 3. Exclude task if I have sub-assigned it
+    //    to another user.
+    // --------------------------------------------------
+
+    const pendingWithMeConditions: Prisma.TaskWhereInput[] = [
+      // Task is actively assigned to logged-in user
+      {
+        assignments: {
+          some: {
+            assignedToId: userId,
+            active: true,
+          },
+        },
+      },
+
+      // Task is not completed or closed
+      {
+        status: {
+          notIn: [
+            TaskStatus.COMPLETED,
+            TaskStatus.CLOSED,
+          ],
+        },
+      },
+
+      // Exclude tasks sub-assigned by logged-in user
+      {
+        NOT: {
+          assignments: {
+            some: {
+              assignedById: userId,
+              isSubAssignment: true,
+              active: true,
+
+              // Safety check:
+              // sub-assignment must be to another user
+              assignedToId: {
+                not: userId,
+              },
+            },
+          },
+        },
+      },
+    ];
+
+    // Use AND so this works correctly even if
+    // other filters such as status/search are present.
+    where.AND = [
+      ...(Array.isArray(where.AND)
+        ? where.AND
+        : where.AND
+          ? [where.AND]
+          : []),
+
+      ...pendingWithMeConditions,
     ];
   }
 
-  // Non-admins are restricted to their own department's data when browsing "all".
-  if (!isAdminOrAbove(role) && q.departmentId === undefined && q.scope === 'all') {
+  else if (q.scope === 'createdByMe') {
+    // --------------------------------------------------
+    // ASSIGNED / CREATED BY ME
+    // --------------------------------------------------
+
+    where.createdById = userId;
+  }
+
+  else if (q.scope === 'subAssignedByMe') {
+    // --------------------------------------------------
+    // SUB-ASSIGNED BY ME
+    // --------------------------------------------------
+
     where.assignments = {
-      some: { assignedTo: { departmentId: myDeptId ?? undefined } },
+      some: {
+        assignedById: userId,
+        isSubAssignment: true,
+      },
     };
   }
-  if (q.departmentId) {
-    where.assignments = { some: { assignedTo: { departmentId: q.departmentId } } };
+
+  else if (!isAdminOrAbove(role) && q.scope !== 'all') {
+    // --------------------------------------------------
+    // STAFF DEFAULT VISIBILITY
+    //
+    // Staff without an explicit scope can only see
+    // tasks which involve them.
+    // --------------------------------------------------
+
+    const visibilityConditions: Prisma.TaskWhereInput = {
+      OR: [
+        {
+          assignments: {
+            some: {
+              assignedToId: userId,
+            },
+          },
+        },
+        {
+          createdById: userId,
+        },
+      ],
+    };
+
+    where.AND = [
+      ...(Array.isArray(where.AND)
+        ? where.AND
+        : where.AND
+          ? [where.AND]
+          : []),
+
+      visibilityConditions,
+    ];
   }
+
+  // --------------------------------------------------------------------------
+  // DEPARTMENT RESTRICTION FOR NON-ADMINS
+  // --------------------------------------------------------------------------
+
+  if (
+    !isAdminOrAbove(role) &&
+    q.departmentId === undefined &&
+    q.scope === 'all'
+  ) {
+    where.assignments = {
+      some: {
+        assignedTo: {
+          departmentId: myDeptId ?? undefined,
+        },
+      },
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // EXPLICIT DEPARTMENT FILTER
+  // --------------------------------------------------------------------------
+
+  if (q.departmentId) {
+    const departmentCondition: Prisma.TaskWhereInput = {
+      assignments: {
+        some: {
+          assignedTo: {
+            departmentId: q.departmentId,
+          },
+        },
+      },
+    };
+
+    // Use AND so department filtering doesn't overwrite
+    // pendingWithMe or other assignment conditions.
+    where.AND = [
+      ...(Array.isArray(where.AND)
+        ? where.AND
+        : where.AND
+          ? [where.AND]
+          : []),
+
+      departmentCondition,
+    ];
+  }
+
+  // --------------------------------------------------------------------------
+  // FETCH TASKS
+  // --------------------------------------------------------------------------
 
   const [tasks, total] = await Promise.all([
     prisma.task.findMany({
       where,
+
       include: {
         assignments: {
-          where: { active: true },
-          include: { assignedTo: { select: { id: true, name: true } } },
+          where: {
+            active: true,
+          },
+
+          include: {
+            assignedTo: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+          },
         },
-        createdBy: { select: { id: true, name: true } },
+
+        createdBy: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
       },
-      orderBy: [{ priority: 'asc' }, { dueDate: 'asc' }],
+
+      orderBy: [
+        {
+          priority: 'asc',
+        },
+        {
+          dueDate: 'asc',
+        },
+      ],
+
       skip: (q.page - 1) * q.pageSize,
       take: q.pageSize,
     }),
-    prisma.task.count({ where }),
+
+    prisma.task.count({
+      where,
+    }),
   ]);
+
+  // --------------------------------------------------------------------------
+  // RESPONSE
+  // --------------------------------------------------------------------------
 
   res.json({
     tasks: tasks.map((t) => ({
       ...t,
-      pendingDays: pendingDays(t.assignments[0]?.createdAt ?? t.createdAt),
+
+      pendingDays: pendingDays(
+        t.assignments[0]?.createdAt ??
+        t.createdAt,
+      ),
     })),
-    pagination: { page: q.page, pageSize: q.pageSize, total },
+
+    pagination: {
+      page: q.page,
+      pageSize: q.pageSize,
+      total,
+    },
   });
 }
-
 // ----------------------------------------------------------------------------
 // Task detail — includes full movement timeline, comments, attachments
 // ----------------------------------------------------------------------------
