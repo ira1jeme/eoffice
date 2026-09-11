@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { format } from 'date-fns';
+
 import { api } from '../../api/client';
 import { TaskListItem, TaskPriority, TaskStatus } from '../../types';
 import { StatusBadge } from '../../components/Tasks/StatusBadge';
@@ -33,21 +34,18 @@ export function TaskList() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
 
-  const [search, setSearch] = useState(
-    params.get('search') ?? ''
-  );
-
   const scope = params.get('scope') ?? '';
   const status = params.get('status') ?? '';
   const priority = params.get('priority') ?? '';
+  const searchParam = params.get('search') ?? '';
 
-  // --------------------------------------------------------------------------
-  // STATUS DROPDOWN VALUE
-  //
-  // "Pending with Me" is not a real TaskStatus.
-  // It is a special scope handled by the backend.
-  // --------------------------------------------------------------------------
+  const [search, setSearch] = useState(searchParam);
 
+  /*
+   * Pending with Me is a scope, not a TaskStatus.
+   * This makes it appear as the selected value in the
+   * status dropdown when scope=pendingWithMe.
+   */
   const statusFilterValue =
     scope === 'pendingWithMe'
       ? 'pendingWithMe'
@@ -60,24 +58,24 @@ export function TaskList() {
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
+    async function loadTasks() {
       try {
         setLoading(true);
 
-        const res = await api.get('/tasks', {
+        const response = await api.get('/tasks', {
           params: {
             scope: scope || undefined,
             status: status || undefined,
             priority: priority || undefined,
-            search: params.get('search') || undefined,
+            search: searchParam || undefined,
             pageSize: 50,
           },
         });
 
         if (cancelled) return;
 
-        setTasks(res.data.tasks);
-        setTotal(res.data.pagination.total);
+        setTasks(response.data.tasks ?? []);
+        setTotal(response.data.pagination?.total ?? 0);
       } catch (error) {
         console.error('Failed to load tasks:', error);
 
@@ -92,15 +90,20 @@ export function TaskList() {
       }
     }
 
-    load();
+    loadTasks();
 
     return () => {
       cancelled = true;
     };
-  }, [scope, status, priority, params]);
+  }, [scope, status, priority, searchParam]);
+
+  // Keep search box in sync with URL
+  useEffect(() => {
+    setSearch(searchParam);
+  }, [searchParam]);
 
   // --------------------------------------------------------------------------
-  // UPDATE URL PARAMETER
+  // UPDATE A URL PARAMETER
   // --------------------------------------------------------------------------
 
   function updateParam(key: string, value: string) {
@@ -116,37 +119,50 @@ export function TaskList() {
   }
 
   // --------------------------------------------------------------------------
+  // SEARCH
+  // --------------------------------------------------------------------------
+
+  function applySearch() {
+    const next = new URLSearchParams(params);
+
+    const trimmed = search.trim();
+
+    if (trimmed) {
+      next.set('search', trimmed);
+    } else {
+      next.delete('search');
+    }
+
+    setParams(next);
+  }
+
+  // --------------------------------------------------------------------------
   // STATUS / PENDING WITH ME FILTER
   // --------------------------------------------------------------------------
 
   function handleStatusFilter(value: string) {
     const next = new URLSearchParams(params);
 
-    // --------------------------------------------------
-    // PENDING WITH ME
-    //
-    // This is a scope, NOT a TaskStatus.
-    // --------------------------------------------------
-
+    /*
+     * Pending with Me:
+     * sends scope=pendingWithMe
+     * and removes the normal status filter.
+     */
     if (value === 'pendingWithMe') {
       next.set('scope', 'pendingWithMe');
-
-      // Remove normal status because Pending with Me
-      // already selects all non-completed/non-closed tasks
-      // currently lying with the logged-in user.
       next.delete('status');
 
       setParams(next);
       return;
     }
 
-    // --------------------------------------------------
-    // NORMAL STATUS FILTER
-    // --------------------------------------------------
-
-    // If user was previously viewing Pending with Me,
-    // remove that special scope when switching back
-    // to a normal status.
+    /*
+     * If leaving Pending with Me, remove only
+     * the pendingWithMe scope.
+     *
+     * Other scopes such as mine/createdByMe/
+     * subAssignedByMe are preserved.
+     */
     if (next.get('scope') === 'pendingWithMe') {
       next.delete('scope');
     }
@@ -179,16 +195,12 @@ export function TaskList() {
   return (
     <div className="space-y-4">
 
-      {/* ------------------------------------------------------------------ */}
-      {/* FILTER BAR                                                         */}
-      {/* ------------------------------------------------------------------ */}
-
+      {/* FILTER BAR */}
       <div className="flex flex-wrap items-center justify-between gap-3">
 
         <div className="flex flex-wrap items-center gap-2">
 
-          {/* SEARCH ------------------------------------------------------- */}
-
+          {/* SEARCH */}
           <input
             className="input w-56"
             placeholder="Search Task ID, subject…"
@@ -196,49 +208,38 @@ export function TaskList() {
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
-                updateParam('search', search);
+                applySearch();
               }
             }}
           />
 
-          {/* STATUS / PENDING WITH ME ------------------------------------ */}
-
+          {/* STATUS / PENDING WITH ME */}
           <select
             className="input w-auto"
             value={statusFilterValue}
-            onChange={(e) =>
-              handleStatusFilter(e.target.value)
-            }
+            onChange={(e) => handleStatusFilter(e.target.value)}
           >
             <option value="">
               All statuses
             </option>
 
-            {/* Special filter */}
             <option value="pendingWithMe">
               Pending with Me
             </option>
 
             {STATUSES.map((s) => (
-              <option
-                key={s}
-                value={s}
-              >
+              <option key={s} value={s}>
                 {s.replace(/_/g, ' ')}
               </option>
             ))}
           </select>
 
-          {/* PRIORITY ----------------------------------------------------- */}
-
+          {/* PRIORITY */}
           <select
             className="input w-auto"
             value={priority}
             onChange={(e) =>
-              updateParam(
-                'priority',
-                e.target.value
-              )
+              updateParam('priority', e.target.value)
             }
           >
             <option value="">
@@ -246,48 +247,33 @@ export function TaskList() {
             </option>
 
             {PRIORITIES.map((p) => (
-              <option
-                key={p}
-                value={p}
-              >
+              <option key={p} value={p}>
                 {p}
               </option>
             ))}
           </select>
 
-          {/* CLEAR ACTIVE SCOPE ------------------------------------------ */}
-
+          {/* CLEAR SCOPE */}
           {scope && (
             <button
+              type="button"
               className="btn-secondary"
               onClick={clearScope}
             >
               Clear scope
             </button>
           )}
-
         </div>
 
-        {/* NEW TASK ------------------------------------------------------- */}
-
-        <Link
-          to="/tasks/new"
-          className="btn-primary"
-        >
+        <Link to="/tasks/new" className="btn-primary">
           + New Task
         </Link>
-
       </div>
 
-      {/* ------------------------------------------------------------------ */}
-      {/* TASK TABLE                                                         */}
-      {/* ------------------------------------------------------------------ */}
-
+      {/* TASK TABLE */}
       <div className="card overflow-hidden">
 
         <table className="w-full text-sm">
-
-          {/* TABLE HEADER ------------------------------------------------- */}
 
           <thead>
             <tr className="border-b border-border2 bg-navy-50/60 text-left text-xs uppercase tracking-wide text-slate2-500">
@@ -319,11 +305,7 @@ export function TaskList() {
             </tr>
           </thead>
 
-          {/* TABLE BODY --------------------------------------------------- */}
-
           <tbody>
-
-            {/* LOADING ---------------------------------------------------- */}
 
             {loading && (
               <tr>
@@ -336,81 +318,57 @@ export function TaskList() {
               </tr>
             )}
 
-            {/* NO RESULTS ------------------------------------------------- */}
+            {!loading && tasks.length === 0 && (
+              <tr>
+                <td
+                  colSpan={6}
+                  className="px-4 py-8 text-center text-slate2-500"
+                >
+                  No tasks match these filters.
+                </td>
+              </tr>
+            )}
 
             {!loading &&
-              tasks.length === 0 && (
-                <tr>
-                  <td
-                    colSpan={6}
-                    className="px-4 py-8 text-center text-slate2-500"
-                  >
-                    No tasks match these filters.
-                  </td>
-                </tr>
-              )}
-
-            {/* TASK ROWS -------------------------------------------------- */}
-
-            {!loading &&
-              tasks.map((t) => {
-
+              tasks.map((task) => {
                 const overdue =
-                  t.dueDate &&
-                  new Date(t.dueDate) <
-                    new Date() &&
-                  ![
-                    'COMPLETED',
-                    'CLOSED',
-                  ].includes(t.status);
+                  !!task.dueDate &&
+                  new Date(task.dueDate) < new Date() &&
+                  !['COMPLETED', 'CLOSED'].includes(task.status);
 
                 return (
                   <tr
-                    key={t.id}
+                    key={task.id}
                     className="border-b border-border2 last:border-0 hover:bg-navy-50/50"
                   >
 
-                    {/* TASK ----------------------------------------------- */}
-
+                    {/* TASK */}
                     <td className="px-4 py-2.5">
 
                       <Link
-                        to={`/tasks/${t.id}`}
+                        to={`/tasks/${task.id}`}
                         className="hover:underline"
                       >
                         <span className="file-stamp mr-2">
-                          {t.fileId}
+                          {task.fileId}
                         </span>
 
-                        {t.subject}
+                        {task.subject}
                       </Link>
 
                     </td>
 
-                    {/* ASSIGNED TO ---------------------------------------- */}
-
+                    {/* ASSIGNED TO */}
                     <td className="px-4 py-2.5 text-slate2-600">
-
-                      {t.assignments[0]
-                        ?.assignedTo.name ??
-                        '—'}
-
+                      {task.assignments?.[0]?.assignedTo?.name ?? '—'}
                     </td>
 
-                    {/* PRIORITY ------------------------------------------- */}
-
+                    {/* PRIORITY */}
                     <td className="px-4 py-2.5">
-
-                      <PriorityTag
-                        priority={
-                          t.priority
-                        }
-                      />
-
+                      <PriorityTag priority={task.priority} />
                     </td>
 
-                    {/* DUE DATE ------------------------------------------- */}
-
+                    {/* DUE DATE */}
                     <td
                       className={`px-4 py-2.5 ${
                         overdue
@@ -418,40 +376,24 @@ export function TaskList() {
                           : 'text-slate2-600'
                       }`}
                     >
-
-                      {t.dueDate
+                      {task.dueDate
                         ? format(
-                            new Date(
-                              t.dueDate
-                            ),
+                            new Date(task.dueDate),
                             'dd MMM yyyy'
                           )
                         : '—'}
 
-                      {overdue
-                        ? ' (overdue)'
-                        : ''}
-
+                      {overdue ? ' (overdue)' : ''}
                     </td>
 
-                    {/* STATUS --------------------------------------------- */}
-
+                    {/* STATUS */}
                     <td className="px-4 py-2.5">
-
-                      <StatusBadge
-                        status={
-                          t.status
-                        }
-                      />
-
+                      <StatusBadge status={task.status} />
                     </td>
 
-                    {/* PENDING DAYS --------------------------------------- */}
-
+                    {/* PENDING DAYS */}
                     <td className="px-4 py-2.5 text-slate2-600">
-
-                      {t.pendingDays}d
-
+                      {task.pendingDays}d
                     </td>
 
                   </tr>
@@ -459,19 +401,12 @@ export function TaskList() {
               })}
 
           </tbody>
-
         </table>
-
       </div>
-
-      {/* ------------------------------------------------------------------ */}
-      {/* RESULT COUNT                                                       */}
-      {/* ------------------------------------------------------------------ */}
 
       <p className="text-xs text-slate2-500">
         {total} task(s) found.
       </p>
-
     </div>
   );
 }
