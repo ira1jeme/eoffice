@@ -1,254 +1,529 @@
 import { Response } from 'express';
 import { z } from 'zod';
-import { Prisma, TaskStatus, TaskPriority } from '@prisma/client';
+import {
+  Prisma,
+  TaskStatus,
+  TaskPriority,
+} from '@prisma/client';
+
 import { prisma } from '../config/db';
-import { AuthedRequest, isAdminOrAbove } from '../middleware/auth';
+
+import {
+  AuthedRequest,
+  isAdminOrAbove,
+} from '../middleware/auth';
+
 import { ApiError } from '../middleware/errorHandler';
-import { nextFileId, recordMovement, pendingDays, pendingBucket } from '../services/task.service';
+
+import {
+  nextFileId,
+  recordMovement,
+  pendingDays,
+  pendingBucket,
+} from '../services/task.service';
+
 import { notify } from '../services/notification.service';
 import { audit } from '../services/audit.service';
 
-// ----------------------------------------------------------------------------
-// Create task (Admin / Super Admin only) — always creates the initial
-// assignment in the same transaction so a task is never left unassigned.
-// ----------------------------------------------------------------------------
+// ============================================================================
+// CREATE TASK
+// ============================================================================
 
 const createTaskSchema = z.object({
-  subject: z.string().min(1, 'Subject is required.'),
-  description: z.string().optional(),
-  priority: z.nativeEnum(TaskPriority).default('MEDIUM'),
-  dueDate: z.string().datetime().optional(),
-  assignedToId: z.string().min(1, 'Assignee is required.'),
-  instructions: z.string().optional(),
-  parentTaskId: z.string().optional(),
-});
+  subject: z
+    .string()
+    .min(1, 'Subject is required.'),
 
-export async function createTask(req: AuthedRequest, res: Response) {
-  const data = createTaskSchema.parse(req.body);
-  const actorId = req.user!.userId;
-
-  const assignee = await prisma.user.findUnique({ where: { id: data.assignedToId } });
-  if (!assignee || assignee.status !== 'ACTIVE') {
-    throw new ApiError(400, 'Selected assignee does not exist or is disabled.');
-  }
-
-  const fileId = await nextFileId();
-  const dueDate = data.dueDate ? new Date(data.dueDate) : null;
-
-  const task = await prisma.$transaction(async (tx) => {
-    const created = await tx.task.create({
-      data: {
-        fileId,
-        subject: data.subject,
-        description: data.description,
-        priority: data.priority,
-        status: TaskStatus.ASSIGNED,
-        createdById: actorId,
-        dueDate,
-        parentTaskId: data.parentTaskId,
-      },
-    });
-
-    await tx.taskAssignment.create({
-      data: {
-        taskId: created.id,
-        assignedToId: data.assignedToId,
-        assignedById: actorId,
-        instructions: data.instructions,
-        dueDate,
-      },
-    });
-
-    await tx.taskMovement.create({
-      data: { taskId: created.id, actorId, action: 'CREATED', newStatus: TaskStatus.NEW },
-    });
-    await tx.taskMovement.create({
-      data: {
-        taskId: created.id,
-        actorId,
-        action: 'ASSIGNED',
-        previousStatus: TaskStatus.NEW,
-        newStatus: TaskStatus.ASSIGNED,
-        remarks: `Assigned to ${assignee.name}`,
-      },
-    });
-
-    return created;
-  });
-
-  await notify({
-    userId: data.assignedToId,
-    type: 'TASK_ASSIGNED',
-    title: 'New task assigned',
-    message: `"${data.subject}" (${fileId}) has been assigned to you.`,
-    taskId: task.id,
-  });
-  await audit({ userId: actorId, action: 'TASK_CREATED', entityType: 'Task', entityId: task.id, details: fileId, req });
-
-  res.status(201).json({ task });
-}
-
-// ----------------------------------------------------------------------------
-// List tasks with filters
-// ----------------------------------------------------------------------------
-
-const listQuerySchema = z.object({
-  status: z.nativeEnum(TaskStatus).optional(),
-  priority: z.nativeEnum(TaskPriority).optional(),
-  assignedToId: z.string().optional(),
-  departmentId: z.string().optional(),
-  search: z.string().optional(),
-  dueFrom: z.string().datetime().optional(),
-  dueTo: z.string().datetime().optional(),
-
-  // Available scopes:
-  // mine            = all tasks assigned to me
-  // pendingWithMe   = tasks currently pending with me,
-  //                   excluding tasks I have sub-assigned
-  // createdByMe     = tasks created by me
-  // subAssignedByMe = tasks I have sub-assigned
-  // all             = all accessible tasks
-  scope: z
-    .enum([
-      'mine',
-      'pendingWithMe',
-      'createdByMe',
-      'subAssignedByMe',
-      'all',
-    ])
+  description: z
+    .string()
     .optional(),
 
-  page: z.coerce.number().min(1).default(1),
-  pageSize: z.coerce.number().min(1).max(100).default(20),
+  priority: z
+    .nativeEnum(TaskPriority)
+    .default('MEDIUM'),
+
+  dueDate: z
+    .string()
+    .datetime()
+    .optional(),
+
+  assignedToId: z
+    .string()
+    .min(
+      1,
+      'Assignee is required.'
+    ),
+
+  instructions: z
+    .string()
+    .optional(),
+
+  parentTaskId: z
+    .string()
+    .optional(),
 });
 
-export async function listTasks(req: AuthedRequest, res: Response) {
-  const q = listQuerySchema.parse(req.query);
+export async function createTask(
+  req: AuthedRequest,
+  res: Response
+) {
+  const data =
+    createTaskSchema.parse(
+      req.body
+    );
+
+  const actorId =
+    req.user!.userId;
+
+  const assignee =
+    await prisma.user.findUnique({
+      where: {
+        id: data.assignedToId,
+      },
+    });
+
+  if (
+    !assignee ||
+    assignee.status !== 'ACTIVE'
+  ) {
+    throw new ApiError(
+      400,
+      'Selected assignee does not exist or is disabled.'
+    );
+  }
+
+  const fileId =
+    await nextFileId();
+
+  const dueDate =
+    data.dueDate
+      ? new Date(data.dueDate)
+      : null;
+
+  const task =
+    await prisma.$transaction(
+      async (tx) => {
+        const created =
+          await tx.task.create({
+            data: {
+              fileId,
+              subject:
+                data.subject,
+              description:
+                data.description,
+              priority:
+                data.priority,
+
+              /*
+               * A newly created task becomes
+               * ASSIGNED immediately.
+               */
+              status:
+                TaskStatus.ASSIGNED,
+
+              createdById:
+                actorId,
+
+              dueDate,
+
+              parentTaskId:
+                data.parentTaskId,
+            },
+          });
+
+        await tx.taskAssignment.create({
+          data: {
+            taskId:
+              created.id,
+
+            assignedToId:
+              data.assignedToId,
+
+            assignedById:
+              actorId,
+
+            instructions:
+              data.instructions,
+
+            dueDate,
+          },
+        });
+
+        // Historical creation entry
+
+        await tx.taskMovement.create({
+          data: {
+            taskId:
+              created.id,
+
+            actorId,
+
+            action:
+              'CREATED',
+
+            newStatus:
+              TaskStatus.NEW,
+          },
+        });
+
+        // Assignment movement
+
+        await tx.taskMovement.create({
+          data: {
+            taskId:
+              created.id,
+
+            actorId,
+
+            action:
+              'ASSIGNED',
+
+            previousStatus:
+              TaskStatus.NEW,
+
+            newStatus:
+              TaskStatus.ASSIGNED,
+
+            remarks:
+              `Assigned to ${assignee.name}`,
+          },
+        });
+
+        return created;
+      }
+    );
+
+  await notify({
+    userId:
+      data.assignedToId,
+
+    type:
+      'TASK_ASSIGNED',
+
+    title:
+      'New task assigned',
+
+    message:
+      `"${data.subject}" (${fileId}) has been assigned to you.`,
+
+    taskId:
+      task.id,
+  });
+
+  await audit({
+    userId:
+      actorId,
+
+    action:
+      'TASK_CREATED',
+
+    entityType:
+      'Task',
+
+    entityId:
+      task.id,
+
+    details:
+      fileId,
+
+    req,
+  });
+
+  res
+    .status(201)
+    .json({
+      task,
+    });
+}
+
+// ============================================================================
+// LIST TASKS WITH FILTERS
+// ============================================================================
+
+const listQuerySchema =
+  z.object({
+    status:
+      z.nativeEnum(
+        TaskStatus
+      ).optional(),
+
+    priority:
+      z.nativeEnum(
+        TaskPriority
+      ).optional(),
+
+    assignedToId:
+      z.string().optional(),
+
+    departmentId:
+      z.string().optional(),
+
+    search:
+      z.string().optional(),
+
+    dueFrom:
+      z
+        .string()
+        .datetime()
+        .optional(),
+
+    dueTo:
+      z
+        .string()
+        .datetime()
+        .optional(),
+
+    /*
+     * Available scopes
+     *
+     * mine
+     *   All active tasks assigned to logged-in user.
+     *
+     * pendingWithMe
+     *   Tasks currently awaiting action with logged-in user.
+     *
+     * createdByMe
+     *   Tasks created by logged-in user.
+     *
+     * subAssignedByMe
+     *   Tasks sub-assigned by logged-in user.
+     *
+     * all
+     *   All accessible tasks.
+     */
+
+    scope: z
+      .enum([
+        'mine',
+        'pendingWithMe',
+        'createdByMe',
+        'subAssignedByMe',
+        'all',
+      ])
+      .optional(),
+
+    page: z.coerce
+      .number()
+      .min(1)
+      .default(1),
+
+    pageSize: z.coerce
+      .number()
+      .min(1)
+      .max(100)
+      .default(20),
+  });
+
+// ============================================================================
+// HELPER: ADD CONDITION TO TASK WHERE.AND
+// ============================================================================
+
+function addAndCondition(
+  where: Prisma.TaskWhereInput,
+  condition: Prisma.TaskWhereInput
+) {
+  where.AND = [
+    ...(Array.isArray(where.AND)
+      ? where.AND
+      : where.AND
+        ? [where.AND]
+        : []),
+
+    condition,
+  ];
+}
+
+// ============================================================================
+// LIST TASKS
+// ============================================================================
+
+export async function listTasks(
+  req: AuthedRequest,
+  res: Response
+) {
+  const q =
+    listQuerySchema.parse(
+      req.query
+    );
+
   const {
     userId,
     role,
     departmentId: myDeptId,
   } = req.user!;
 
-  const where: Prisma.TaskWhereInput = {};
+  const where:
+    Prisma.TaskWhereInput = {};
 
-  // --------------------------------------------------------------------------
+  // ==========================================================================
   // STATUS FILTER
-  // --------------------------------------------------------------------------
+  // ==========================================================================
 
   if (q.status) {
-    where.status = q.status;
+    where.status =
+      q.status;
   }
 
-  // --------------------------------------------------------------------------
+  // ==========================================================================
   // PRIORITY FILTER
-  // --------------------------------------------------------------------------
+  // ==========================================================================
 
   if (q.priority) {
-    where.priority = q.priority;
+    where.priority =
+      q.priority;
   }
 
-  // --------------------------------------------------------------------------
+  // ==========================================================================
   // DUE DATE FILTER
-  // --------------------------------------------------------------------------
+  // ==========================================================================
 
-  if (q.dueFrom || q.dueTo) {
+  if (
+    q.dueFrom ||
+    q.dueTo
+  ) {
     where.dueDate = {
       ...(q.dueFrom
         ? {
-            gte: new Date(q.dueFrom),
+            gte:
+              new Date(
+                q.dueFrom
+              ),
           }
         : {}),
+
       ...(q.dueTo
         ? {
-            lte: new Date(q.dueTo),
+            lte:
+              new Date(
+                q.dueTo
+              ),
           }
         : {}),
     };
   }
 
-  // --------------------------------------------------------------------------
+  // ==========================================================================
   // SEARCH
-  // --------------------------------------------------------------------------
+  // ==========================================================================
 
   if (q.search) {
     where.OR = [
       {
         subject: {
-          contains: q.search,
-          mode: 'insensitive',
+          contains:
+            q.search,
+
+          mode:
+            'insensitive',
         },
       },
+
       {
         fileId: {
-          contains: q.search,
-          mode: 'insensitive',
+          contains:
+            q.search,
+
+          mode:
+            'insensitive',
         },
       },
+
       {
         description: {
-          contains: q.search,
-          mode: 'insensitive',
+          contains:
+            q.search,
+
+          mode:
+            'insensitive',
         },
       },
     ];
   }
 
-  // --------------------------------------------------------------------------
-  // ASSIGNED TO FILTER
-  // --------------------------------------------------------------------------
+  // ==========================================================================
+  // FILTER BY ASSIGNED USER
+  //
+  // Use AND instead of directly setting where.assignments.
+  // This prevents later scope/department filters from overwriting
+  // the selected staff filter.
+  // ==========================================================================
 
-  if (q.assignedToId) {
-    where.assignments = {
-      some: {
-        assignedToId: q.assignedToId,
-        active: true,
-      },
-    };
-  }
-
-  // --------------------------------------------------------------------------
-  // SCOPE FILTERS
-  // --------------------------------------------------------------------------
-
-  if (q.scope === 'mine') {
-    // --------------------------------------------------
-    // MY TASKS
-    // Includes every active task assigned to me,
-    // including tasks that I may have sub-assigned.
-    // --------------------------------------------------
-
-    where.assignments = {
-      some: {
-        assignedToId: userId,
-        active: true,
-      },
-    };
-  }
-
-  else if (q.scope === 'pendingWithMe') {
-    // --------------------------------------------------
-    // PENDING WITH ME
-    //
-    // Conditions:
-    // 1. Task must be actively assigned to me.
-    // 2. Task must NOT be COMPLETED or CLOSED.
-    // 3. Exclude task if I have sub-assigned it
-    //    to another user.
-    // --------------------------------------------------
-
-    const pendingWithMeConditions: Prisma.TaskWhereInput[] = [
-      // Task is actively assigned to logged-in user
+  if (
+    q.assignedToId
+  ) {
+    addAndCondition(
+      where,
       {
         assignments: {
           some: {
-            assignedToId: userId,
-            active: true,
+            assignedToId:
+              q.assignedToId,
+
+            active:
+              true,
           },
         },
-      },
+      }
+    );
+  }
 
-      // Task is not completed or closed
+  // ==========================================================================
+  // SCOPE: MY TASKS
+  // ==========================================================================
+
+  if (
+    q.scope === 'mine'
+  ) {
+    addAndCondition(
+      where,
+      {
+        assignments: {
+          some: {
+            assignedToId:
+              userId,
+
+            active:
+              true,
+          },
+        },
+      }
+    );
+  }
+
+  // ==========================================================================
+  // SCOPE: PENDING WITH ME
+  //
+  // NOTE:
+  // "Pending with Me" remains a LIST FILTER.
+  // It is NOT TaskStatus.PENDING.
+  // ==========================================================================
+
+  else if (
+    q.scope ===
+    'pendingWithMe'
+  ) {
+    addAndCondition(
+      where,
+      {
+        assignments: {
+          some: {
+            assignedToId:
+              userId,
+
+            active:
+              true,
+          },
+        },
+      }
+    );
+
+    /*
+     * Anything not completed or closed
+     * is considered pending/actionable.
+     */
+
+    addAndCondition(
+      where,
       {
         status: {
           notIn: [
@@ -256,555 +531,1461 @@ export async function listTasks(req: AuthedRequest, res: Response) {
             TaskStatus.CLOSED,
           ],
         },
-      },
+      }
+    );
 
-      // Exclude tasks sub-assigned by logged-in user
+    /*
+     * If logged-in user has already
+     * sub-assigned the task to another user,
+     * don't show it as Pending with Me.
+     */
+
+    addAndCondition(
+      where,
       {
         NOT: {
           assignments: {
             some: {
-              assignedById: userId,
-              isSubAssignment: true,
-              active: true,
+              assignedById:
+                userId,
 
-              // Safety check:
-              // sub-assignment must be to another user
+              isSubAssignment:
+                true,
+
+              active:
+                true,
+
               assignedToId: {
-                not: userId,
+                not:
+                  userId,
               },
             },
           },
         },
-      },
-    ];
-
-    // Use AND so this works correctly even if
-    // other filters such as status/search are present.
-    where.AND = [
-      ...(Array.isArray(where.AND)
-        ? where.AND
-        : where.AND
-          ? [where.AND]
-          : []),
-
-      ...pendingWithMeConditions,
-    ];
+      }
+    );
   }
 
-  else if (q.scope === 'createdByMe') {
-    // --------------------------------------------------
-    // ASSIGNED / CREATED BY ME
-    // --------------------------------------------------
+  // ==========================================================================
+  // SCOPE: CREATED BY ME
+  // ==========================================================================
 
-    where.createdById = userId;
+  else if (
+    q.scope ===
+    'createdByMe'
+  ) {
+    where.createdById =
+      userId;
   }
 
-  else if (q.scope === 'subAssignedByMe') {
-    // --------------------------------------------------
-    // SUB-ASSIGNED BY ME
-    // --------------------------------------------------
+  // ==========================================================================
+  // SCOPE: SUB-ASSIGNED BY ME
+  // ==========================================================================
 
-    where.assignments = {
-      some: {
-        assignedById: userId,
-        isSubAssignment: true,
-      },
-    };
-  }
+  else if (
+    q.scope ===
+    'subAssignedByMe'
+  ) {
+    addAndCondition(
+      where,
+      {
+        assignments: {
+          some: {
+            assignedById:
+              userId,
 
-  else if (!isAdminOrAbove(role) && q.scope !== 'all') {
-    // --------------------------------------------------
-    // STAFF DEFAULT VISIBILITY
-    //
-    // Staff without an explicit scope can only see
-    // tasks which involve them.
-    // --------------------------------------------------
-
-    const visibilityConditions: Prisma.TaskWhereInput = {
-      OR: [
-        {
-          assignments: {
-            some: {
-              assignedToId: userId,
-            },
+            isSubAssignment:
+              true,
           },
         },
-        {
-          createdById: userId,
-        },
-      ],
-    };
-
-    where.AND = [
-      ...(Array.isArray(where.AND)
-        ? where.AND
-        : where.AND
-          ? [where.AND]
-          : []),
-
-      visibilityConditions,
-    ];
+      }
+    );
   }
 
-  // --------------------------------------------------------------------------
-  // DEPARTMENT RESTRICTION FOR NON-ADMINS
-  // --------------------------------------------------------------------------
+  // ==========================================================================
+  // DEFAULT STAFF VISIBILITY
+  // ==========================================================================
+
+  else if (
+    !isAdminOrAbove(role) &&
+    q.scope !== 'all'
+  ) {
+    addAndCondition(
+      where,
+      {
+        OR: [
+          {
+            assignments: {
+              some: {
+                assignedToId:
+                  userId,
+              },
+            },
+          },
+
+          {
+            createdById:
+              userId,
+          },
+        ],
+      }
+    );
+  }
+
+  // ==========================================================================
+  // NON-ADMIN "ALL" DEPARTMENT RESTRICTION
+  // ==========================================================================
 
   if (
     !isAdminOrAbove(role) &&
-    q.departmentId === undefined &&
+    q.departmentId ===
+      undefined &&
     q.scope === 'all'
   ) {
-    where.assignments = {
-      some: {
-        assignedTo: {
-          departmentId: myDeptId ?? undefined,
-        },
-      },
-    };
-  }
-
-  // --------------------------------------------------------------------------
-  // EXPLICIT DEPARTMENT FILTER
-  // --------------------------------------------------------------------------
-
-  if (q.departmentId) {
-    const departmentCondition: Prisma.TaskWhereInput = {
-      assignments: {
-        some: {
-          assignedTo: {
-            departmentId: q.departmentId,
+    addAndCondition(
+      where,
+      {
+        assignments: {
+          some: {
+            assignedTo: {
+              departmentId:
+                myDeptId ??
+                undefined,
+            },
           },
         },
-      },
-    };
-
-    // Use AND so department filtering doesn't overwrite
-    // pendingWithMe or other assignment conditions.
-    where.AND = [
-      ...(Array.isArray(where.AND)
-        ? where.AND
-        : where.AND
-          ? [where.AND]
-          : []),
-
-      departmentCondition,
-    ];
+      }
+    );
   }
 
-  // --------------------------------------------------------------------------
-  // FETCH TASKS
-  // --------------------------------------------------------------------------
+  // ==========================================================================
+  // EXPLICIT DEPARTMENT FILTER
+  // ==========================================================================
 
-  const [tasks, total] = await Promise.all([
-    prisma.task.findMany({
+  if (
+    q.departmentId
+  ) {
+    addAndCondition(
       where,
+      {
+        assignments: {
+          some: {
+            assignedTo: {
+              departmentId:
+                q.departmentId,
+            },
+          },
+        },
+      }
+    );
+  }
+
+  // ==========================================================================
+  // FETCH TASKS
+  // ==========================================================================
+
+  const [
+    tasks,
+    total,
+  ] =
+    await Promise.all([
+      prisma.task.findMany({
+        where,
+
+        include: {
+          assignments: {
+            where: {
+              active:
+                true,
+            },
+
+            include: {
+              assignedTo: {
+                select: {
+                  id:
+                    true,
+
+                  name:
+                    true,
+                },
+              },
+            },
+          },
+
+          createdBy: {
+            select: {
+              id:
+                true,
+
+              name:
+                true,
+            },
+          },
+        },
+
+        orderBy: [
+          {
+            priority:
+              'asc',
+          },
+
+          {
+            dueDate:
+              'asc',
+          },
+        ],
+
+        skip:
+          (q.page - 1) *
+          q.pageSize,
+
+        take:
+          q.pageSize,
+      }),
+
+      prisma.task.count({
+        where,
+      }),
+    ]);
+
+  // ==========================================================================
+  // RESPONSE
+  // ==========================================================================
+
+  res.json({
+    tasks:
+      tasks.map(
+        (t) => ({
+          ...t,
+
+          pendingDays:
+            pendingDays(
+              t
+                .assignments[0]
+                ?.createdAt ??
+                t.createdAt
+            ),
+        })
+      ),
+
+    pagination: {
+      page:
+        q.page,
+
+      pageSize:
+        q.pageSize,
+
+      total,
+    },
+  });
+}
+
+// ============================================================================
+// TASK DETAIL
+// ============================================================================
+
+export async function getTask(
+  req: AuthedRequest,
+  res: Response
+) {
+  const task =
+    await prisma.task.findUnique({
+      where: {
+        id:
+          req.params.id,
+      },
 
       include: {
+        createdBy: {
+          select: {
+            id:
+              true,
+
+            name:
+              true,
+
+            designation:
+              true,
+          },
+        },
+
         assignments: {
-          where: {
-            active: true,
+          orderBy: {
+            createdAt:
+              'asc',
           },
 
           include: {
             assignedTo: {
               select: {
-                id: true,
-                name: true,
+                id:
+                  true,
+
+                name:
+                  true,
+
+                designation:
+                  true,
+              },
+            },
+
+            assignedBy: {
+              select: {
+                id:
+                  true,
+
+                name:
+                  true,
+
+                designation:
+                  true,
               },
             },
           },
         },
 
-        createdBy: {
+        movements: {
+          orderBy: {
+            createdAt:
+              'asc',
+          },
+
+          include: {
+            actor: {
+              select: {
+                id:
+                  true,
+
+                name:
+                  true,
+              },
+            },
+          },
+        },
+
+        comments: {
+          orderBy: {
+            createdAt:
+              'asc',
+          },
+
+          include: {
+            user: {
+              select: {
+                id:
+                  true,
+
+                name:
+                  true,
+              },
+            },
+          },
+        },
+
+        attachments: {
+          include: {
+            uploadedBy: {
+              select: {
+                id:
+                  true,
+
+                name:
+                  true,
+              },
+            },
+          },
+        },
+
+        subTasks: {
           select: {
-            id: true,
-            name: true,
+            id:
+              true,
+
+            fileId:
+              true,
+
+            subject:
+              true,
+
+            status:
+              true,
+
+            priority:
+              true,
+          },
+        },
+
+        parentTask: {
+          select: {
+            id:
+              true,
+
+            fileId:
+              true,
+
+            subject:
+              true,
           },
         },
       },
+    });
 
-      orderBy: [
-        {
-          priority: 'asc',
-        },
-        {
-          dueDate: 'asc',
-        },
-      ],
-
-      skip: (q.page - 1) * q.pageSize,
-      take: q.pageSize,
-    }),
-
-    prisma.task.count({
-      where,
-    }),
-  ]);
-
-  // --------------------------------------------------------------------------
-  // RESPONSE
-  // --------------------------------------------------------------------------
+  if (!task) {
+    throw new ApiError(
+      404,
+      'Task not found.'
+    );
+  }
 
   res.json({
-    tasks: tasks.map((t) => ({
-      ...t,
-
-      pendingDays: pendingDays(
-        t.assignments[0]?.createdAt ??
-        t.createdAt,
-      ),
-    })),
-
-    pagination: {
-      page: q.page,
-      pageSize: q.pageSize,
-      total,
-    },
+    task,
   });
 }
-// ----------------------------------------------------------------------------
-// Task detail — includes full movement timeline, comments, attachments
-// ----------------------------------------------------------------------------
 
-export async function getTask(req: AuthedRequest, res: Response) {
-  const task = await prisma.task.findUnique({
-    where: { id: req.params.id },
-    include: {
-      createdBy: { select: { id: true, name: true, designation: true } },
-      assignments: {
-        orderBy: { createdAt: 'asc' },
-        include: {
-          assignedTo: { select: { id: true, name: true, designation: true } },
-          assignedBy: { select: { id: true, name: true, designation: true } },
-        },
-      },
-      movements: {
-        orderBy: { createdAt: 'asc' },
-        include: { actor: { select: { id: true, name: true } } },
-      },
-      comments: {
-        orderBy: { createdAt: 'asc' },
-        include: { user: { select: { id: true, name: true } } },
-      },
-      attachments: {
-        include: { uploadedBy: { select: { id: true, name: true } } },
-      },
-      subTasks: {
-        select: { id: true, fileId: true, subject: true, status: true, priority: true },
-      },
-      parentTask: { select: { id: true, fileId: true, subject: true } },
-    },
+// ============================================================================
+// ASSIGN / REASSIGN
+// ============================================================================
+
+const assignSchema =
+  z.object({
+    assignedToId:
+      z
+        .string()
+        .min(1),
+
+    instructions:
+      z
+        .string()
+        .optional(),
+
+    dueDate:
+      z
+        .string()
+        .datetime()
+        .optional(),
   });
 
-  if (!task) throw new ApiError(404, 'Task not found.');
-  res.json({ task });
-}
+export async function assignTask(
+  req: AuthedRequest,
+  res: Response
+) {
+  const {
+    role,
+    userId,
+  } = req.user!;
 
-// ----------------------------------------------------------------------------
-// Assign / reassign (Admin) and Sub-assign (assignee with permission)
-// ----------------------------------------------------------------------------
-
-const assignSchema = z.object({
-  assignedToId: z.string().min(1),
-  instructions: z.string().optional(),
-  dueDate: z.string().datetime().optional(),
-});
-
-export async function assignTask(req: AuthedRequest, res: Response) {
-  const { role, userId } = req.user!;
-  if (!isAdminOrAbove(role)) throw new ApiError(403, 'Only admins can (re)assign tasks directly.');
-
-  const data = assignSchema.parse(req.body);
-  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
-  if (!task) throw new ApiError(404, 'Task not found.');
-
-  const assignee = await prisma.user.findUnique({ where: { id: data.assignedToId } });
-  if (!assignee || assignee.status !== 'ACTIVE') throw new ApiError(400, 'Assignee not found or disabled.');
-
-  await prisma.$transaction(async (tx) => {
-    await tx.taskAssignment.updateMany({ where: { taskId: task.id, active: true }, data: { active: false } });
-    await tx.taskAssignment.create({
-      data: {
-        taskId: task.id,
-        assignedToId: data.assignedToId,
-        assignedById: userId,
-        instructions: data.instructions,
-        dueDate: data.dueDate ? new Date(data.dueDate) : task.dueDate,
-      },
-    });
-    await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.ASSIGNED } });
-    await recordMovementTx(tx, {
-      taskId: task.id,
-      actorId: userId,
-      action: 'ASSIGNED',
-      previousStatus: task.status,
-      newStatus: TaskStatus.ASSIGNED,
-      remarks: `Reassigned to ${assignee.name}`,
-    });
-  });
-
-  await notify({
-    userId: data.assignedToId,
-    type: 'TASK_ASSIGNED',
-    title: 'Task assigned to you',
-    message: `"${task.subject}" (${task.fileId}) has been assigned to you.`,
-    taskId: task.id,
-  });
-  await audit({ userId, action: 'TASK_ASSIGNED', entityType: 'Task', entityId: task.id, req });
-
-  res.json({ message: 'Task assigned.' });
-}
-
-export async function subAssignTask(req: AuthedRequest, res: Response) {
-  const { role, userId, canSubAssign } = req.user!;
-  const data = assignSchema.parse(req.body);
-
-  const task = await prisma.task.findUnique({
-    where: { id: req.params.id },
-    include: { assignments: { where: { active: true } } },
-  });
-  if (!task) throw new ApiError(404, 'Task not found.');
-
-  const isCurrentAssignee = task.assignments.some((a) => a.assignedToId === userId);
-  if (!isAdminOrAbove(role) && !(isCurrentAssignee && canSubAssign)) {
-    throw new ApiError(403, 'You do not have permission to sub-assign this task.');
+  if (
+    !isAdminOrAbove(
+      role
+    )
+  ) {
+    throw new ApiError(
+      403,
+      'Only admins can (re)assign tasks directly.'
+    );
   }
 
-  const assignee = await prisma.user.findUnique({ where: { id: data.assignedToId } });
-  if (!assignee || assignee.status !== 'ACTIVE') throw new ApiError(400, 'Assignee not found or disabled.');
+  const data =
+    assignSchema.parse(
+      req.body
+    );
 
-  await prisma.$transaction(async (tx) => {
-    await tx.taskAssignment.create({
-      data: {
-        taskId: task.id,
-        assignedToId: data.assignedToId,
-        assignedById: userId,
-        instructions: data.instructions,
-        dueDate: data.dueDate ? new Date(data.dueDate) : task.dueDate,
-        isSubAssignment: true,
+  const task =
+    await prisma.task.findUnique({
+      where: {
+        id:
+          req.params.id,
       },
     });
-    await recordMovementTx(tx, {
-      taskId: task.id,
-      actorId: userId,
-      action: 'SUB_ASSIGNED',
-      remarks: `Sub-assigned to ${assignee.name}`,
+
+  if (!task) {
+    throw new ApiError(
+      404,
+      'Task not found.'
+    );
+  }
+
+  const assignee =
+    await prisma.user.findUnique({
+      where: {
+        id:
+          data.assignedToId,
+      },
     });
-  });
 
-  await notify({
-    userId: data.assignedToId,
-    type: 'TASK_SUB_ASSIGNED',
-    title: 'Task sub-assigned to you',
-    message: `"${task.subject}" (${task.fileId}) has been sub-assigned to you.`,
-    taskId: task.id,
-  });
-  await audit({ userId, action: 'TASK_SUB_ASSIGNED', entityType: 'Task', entityId: task.id, req });
-
-  res.json({ message: 'Task sub-assigned.' });
-}
-
-// ----------------------------------------------------------------------------
-// Status transitions: acknowledge, start progress, submit, approve/return, close
-// ----------------------------------------------------------------------------
-
-const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
-  NEW: ['ASSIGNED'],
-  ASSIGNED: ['ACKNOWLEDGED'],
-  ACKNOWLEDGED: ['IN_PROGRESS'],
-  IN_PROGRESS: ['PENDING', 'SUBMITTED'],
-  PENDING: ['IN_PROGRESS', 'SUBMITTED'],
-  SUBMITTED: ['UNDER_REVIEW'],
-  UNDER_REVIEW: ['COMPLETED', 'RETURNED'],
-  RETURNED: ['IN_PROGRESS'],
-  COMPLETED: ['CLOSED'],
-  CLOSED: [],
-};
-
-const statusSchema = z.object({
-  status: z.nativeEnum(TaskStatus),
-  remarks: z.string().optional(),
-});
-
-export async function updateTaskStatus(req: AuthedRequest, res: Response) {
-  const { userId, role } = req.user!;
-  const { status: newStatus, remarks } = statusSchema.parse(req.body);
-
-  const task = await prisma.task.findUnique({
-    where: { id: req.params.id },
-    include: { assignments: { where: { active: true } } },
-  });
-  if (!task) throw new ApiError(404, 'Task not found.');
-
-  const isAssignee = task.assignments.some((a) => a.assignedToId === userId);
-  const reviewTransitions: TaskStatus[] = ['COMPLETED', 'RETURNED', 'CLOSED'];
-  const requiresAdmin = reviewTransitions.includes(newStatus);
-
-  if (requiresAdmin && !isAdminOrAbove(role)) {
-    throw new ApiError(403, 'Only an admin/reviewer can approve, return, or close a task.');
-  }
-  if (!requiresAdmin && !isAssignee && !isAdminOrAbove(role)) {
-    throw new ApiError(403, 'Only the assignee can update this task\'s progress.');
-  }
-
-  const allowed = VALID_TRANSITIONS[task.status] ?? [];
-  if (!allowed.includes(newStatus)) {
+  if (
+    !assignee ||
+    assignee.status !== 'ACTIVE'
+  ) {
     throw new ApiError(
       400,
-      `Cannot move task from ${task.status} to ${newStatus}. Valid next steps: ${allowed.join(', ') || 'none'}.`,
+      'Assignee not found or disabled.'
     );
   }
 
-  const actionMap: Partial<Record<TaskStatus, string>> = {
-    ACKNOWLEDGED: 'ACKNOWLEDGED',
-    IN_PROGRESS: 'STATUS_CHANGE',
-    SUBMITTED: 'SUBMITTED',
-    UNDER_REVIEW: 'STATUS_CHANGE',
-    COMPLETED: 'APPROVED',
-    RETURNED: 'RETURNED',
-    CLOSED: 'CLOSED',
-    PENDING: 'STATUS_CHANGE',
-  };
+  await prisma.$transaction(
+    async (tx) => {
+      /*
+       * Reassignment replaces all currently
+       * active assignments.
+       */
 
-  await prisma.$transaction(async (tx) => {
-    await tx.task.update({
-      where: { id: task.id },
-      data: {
-        status: newStatus,
-        completionDate: newStatus === 'COMPLETED' ? new Date() : task.completionDate,
-      },
-    });
-    await recordMovementTx(tx, {
-      taskId: task.id,
-      actorId: userId,
-      action: actionMap[newStatus] ?? 'STATUS_CHANGE',
-      previousStatus: task.status,
-      newStatus,
-      remarks,
-    });
-  });
+      await tx.taskAssignment.updateMany({
+        where: {
+          taskId:
+            task.id,
 
-  if (newStatus === 'RETURNED') {
-    await Promise.all(
-      task.assignments.map((a) =>
-        notify({
-          userId: a.assignedToId,
-          type: 'TASK_RETURNED',
-          title: 'Task returned for correction',
-          message: remarks || `"${task.subject}" (${task.fileId}) was returned for correction.`,
-          taskId: task.id,
-        }),
-      ),
-    );
-  } else if (newStatus === 'COMPLETED') {
-    await notify({
-      userId: task.createdById,
-      type: 'TASK_APPROVED',
-      title: 'Task approved',
-      message: `"${task.subject}" (${task.fileId}) has been approved and marked complete.`,
-      taskId: task.id,
-    });
-  }
-  await audit({ userId, action: 'TASK_STATUS_CHANGE', entityType: 'Task', entityId: task.id, details: `${task.status} -> ${newStatus}`, req });
+          active:
+            true,
+        },
 
-  res.json({ message: `Task moved to ${newStatus}.` });
-}
-
-// ----------------------------------------------------------------------------
-// Comments
-// ----------------------------------------------------------------------------
-
-const commentSchema = z.object({ message: z.string().min(1) });
-
-export async function addComment(req: AuthedRequest, res: Response) {
-  const { message } = commentSchema.parse(req.body);
-  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
-  if (!task) throw new ApiError(404, 'Task not found.');
-
-  const comment = await prisma.taskComment.create({
-    data: { taskId: task.id, userId: req.user!.userId, message },
-    include: { user: { select: { id: true, name: true } } },
-  });
-
-  await recordMovement({
-    taskId: task.id,
-    actorId: req.user!.userId,
-    action: 'COMMENT',
-    remarks: message.slice(0, 140),
-  });
-
-  res.status(201).json({ comment });
-}
-
-// ----------------------------------------------------------------------------
-// Pending task monitoring (admin)
-// ----------------------------------------------------------------------------
-
-export async function pendingMonitor(req: AuthedRequest, res: Response) {
-  if (!isAdminOrAbove(req.user!.role)) throw new ApiError(403, 'Admins only.');
-
-  const staffList = await prisma.user.findMany({
-    where: { status: 'ACTIVE' },
-    select: { id: true, name: true, designation: true },
-  });
-
-  const results = await Promise.all(
-    staffList.map(async (s) => {
-      const assignments = await prisma.taskAssignment.findMany({
-        where: { assignedToId: s.id, active: true },
-        include: { task: { select: { status: true, dueDate: true } } },
+        data: {
+          active:
+            false,
+        },
       });
 
-      const total = assignments.length;
-      const completed = assignments.filter((a) => a.task.status === 'COMPLETED' || a.task.status === 'CLOSED').length;
-      const pending = assignments.filter(
-        (a) => !['COMPLETED', 'CLOSED'].includes(a.task.status),
-      ).length;
-      const overdue = assignments.filter(
-        (a) => a.task.dueDate && a.task.dueDate < new Date() && !['COMPLETED', 'CLOSED'].includes(a.task.status),
-      ).length;
+      await tx.taskAssignment.create({
+        data: {
+          taskId:
+            task.id,
 
-      const oldestPendingDays = assignments
-        .filter((a) => !['COMPLETED', 'CLOSED'].includes(a.task.status))
-        .map((a) => pendingDays(a.createdAt))
-        .sort((a, b) => b - a)[0];
+          assignedToId:
+            data.assignedToId,
 
-      return {
-        staff: s,
-        total,
-        pending,
-        completed,
-        overdue,
-        oldestPendingDays: oldestPendingDays ?? 0,
-        oldestPendingBucket: oldestPendingDays !== undefined ? pendingBucket(oldestPendingDays) : null,
-      };
-    }),
+          assignedById:
+            userId,
+
+          instructions:
+            data.instructions,
+
+          dueDate:
+            data.dueDate
+              ? new Date(
+                  data.dueDate
+                )
+              : task.dueDate,
+        },
+      });
+
+      await tx.task.update({
+        where: {
+          id:
+            task.id,
+        },
+
+        data: {
+          status:
+            TaskStatus.ASSIGNED,
+
+          /*
+           * A reassigned task should not retain
+           * an old completion timestamp.
+           */
+          completionDate:
+            null,
+        },
+      });
+
+      await recordMovementTx(
+        tx,
+        {
+          taskId:
+            task.id,
+
+          actorId:
+            userId,
+
+          action:
+            'ASSIGNED',
+
+          previousStatus:
+            task.status,
+
+          newStatus:
+            TaskStatus.ASSIGNED,
+
+          remarks:
+            `Reassigned to ${assignee.name}`,
+        }
+      );
+    }
   );
 
-  res.json({ monitor: results });
+  await notify({
+    userId:
+      data.assignedToId,
+
+    type:
+      'TASK_ASSIGNED',
+
+    title:
+      'Task assigned to you',
+
+    message:
+      `"${task.subject}" (${task.fileId}) has been assigned to you.`,
+
+    taskId:
+      task.id,
+  });
+
+  await audit({
+    userId,
+
+    action:
+      'TASK_ASSIGNED',
+
+    entityType:
+      'Task',
+
+    entityId:
+      task.id,
+
+    req,
+  });
+
+  res.json({
+    message:
+      'Task assigned.',
+  });
 }
 
-// small helper so we can reuse recordMovement's shape inside a $transaction
+// ============================================================================
+// SUB-ASSIGN TASK
+// ============================================================================
+
+export async function subAssignTask(
+  req: AuthedRequest,
+  res: Response
+) {
+  const {
+    role,
+    userId,
+    canSubAssign,
+  } = req.user!;
+
+  const data =
+    assignSchema.parse(
+      req.body
+    );
+
+  const task =
+    await prisma.task.findUnique({
+      where: {
+        id:
+          req.params.id,
+      },
+
+      include: {
+        assignments: {
+          where: {
+            active:
+              true,
+          },
+        },
+      },
+    });
+
+  if (!task) {
+    throw new ApiError(
+      404,
+      'Task not found.'
+    );
+  }
+
+  const isCurrentAssignee =
+    task.assignments.some(
+      (a) =>
+        a.assignedToId ===
+        userId
+    );
+
+  if (
+    !isAdminOrAbove(
+      role
+    ) &&
+    !(
+      isCurrentAssignee &&
+      canSubAssign
+    )
+  ) {
+    throw new ApiError(
+      403,
+      'You do not have permission to sub-assign this task.'
+    );
+  }
+
+  const assignee =
+    await prisma.user.findUnique({
+      where: {
+        id:
+          data.assignedToId,
+      },
+    });
+
+  if (
+    !assignee ||
+    assignee.status !== 'ACTIVE'
+  ) {
+    throw new ApiError(
+      400,
+      'Assignee not found or disabled.'
+    );
+  }
+
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.taskAssignment.create({
+        data: {
+          taskId:
+            task.id,
+
+          assignedToId:
+            data.assignedToId,
+
+          assignedById:
+            userId,
+
+          instructions:
+            data.instructions,
+
+          dueDate:
+            data.dueDate
+              ? new Date(
+                  data.dueDate
+                )
+              : task.dueDate,
+
+          isSubAssignment:
+            true,
+        },
+      });
+
+      await recordMovementTx(
+        tx,
+        {
+          taskId:
+            task.id,
+
+          actorId:
+            userId,
+
+          action:
+            'SUB_ASSIGNED',
+
+          remarks:
+            `Sub-assigned to ${assignee.name}`,
+        }
+      );
+    }
+  );
+
+  await notify({
+    userId:
+      data.assignedToId,
+
+    type:
+      'TASK_SUB_ASSIGNED',
+
+    title:
+      'Task sub-assigned to you',
+
+    message:
+      `"${task.subject}" (${task.fileId}) has been sub-assigned to you.`,
+
+    taskId:
+      task.id,
+  });
+
+  await audit({
+    userId,
+
+    action:
+      'TASK_SUB_ASSIGNED',
+
+    entityType:
+      'Task',
+
+    entityId:
+      task.id,
+
+    req,
+  });
+
+  res.json({
+    message:
+      'Task sub-assigned.',
+  });
+}
+
+// ============================================================================
+// SIMPLIFIED TASK STATUS WORKFLOW
+//
+// NEW -> ASSIGNED
+//
+// ASSIGNED -> SUBMITTED
+//
+// SUBMITTED -> COMPLETED
+//           -> RETURNED
+//
+// RETURNED -> SUBMITTED
+//
+// COMPLETED -> CLOSED
+//
+// Legacy statuses remain in this map only so tasks already stored in the
+// database with the old values can still be moved into the new workflow.
+// ============================================================================
+
+const VALID_TRANSITIONS:
+  Record<
+    TaskStatus,
+    TaskStatus[]
+  > = {
+    NEW: [
+      'ASSIGNED',
+    ],
+
+    ASSIGNED: [
+      'SUBMITTED',
+    ],
+
+    SUBMITTED: [
+      'COMPLETED',
+      'RETURNED',
+    ],
+
+    RETURNED: [
+      'SUBMITTED',
+    ],
+
+    COMPLETED: [
+      'CLOSED',
+    ],
+
+    CLOSED: [],
+
+    // ------------------------------------------------------------------------
+    // LEGACY STATUS RECOVERY
+    // ------------------------------------------------------------------------
+
+    ACKNOWLEDGED: [
+      'SUBMITTED',
+    ],
+
+    IN_PROGRESS: [
+      'SUBMITTED',
+    ],
+
+    PENDING: [
+      'SUBMITTED',
+    ],
+
+    UNDER_REVIEW: [
+      'COMPLETED',
+      'RETURNED',
+    ],
+  };
+
+// ============================================================================
+// STATUS REQUEST
+// ============================================================================
+
+const statusSchema =
+  z.object({
+    status:
+      z.nativeEnum(
+        TaskStatus
+      ),
+
+    remarks:
+      z
+        .string()
+        .optional(),
+  });
+
+// ============================================================================
+// UPDATE TASK STATUS
+// ============================================================================
+
+export async function updateTaskStatus(
+  req: AuthedRequest,
+  res: Response
+) {
+  const {
+    userId,
+    role,
+  } = req.user!;
+
+  const {
+    status:
+      newStatus,
+    remarks,
+  } =
+    statusSchema.parse(
+      req.body
+    );
+
+  const task =
+    await prisma.task.findUnique({
+      where: {
+        id:
+          req.params.id,
+      },
+
+      include: {
+        assignments: {
+          where: {
+            active:
+              true,
+          },
+        },
+      },
+    });
+
+  if (!task) {
+    throw new ApiError(
+      404,
+      'Task not found.'
+    );
+  }
+
+  const isAssignee =
+    task.assignments.some(
+      (a) =>
+        a.assignedToId ===
+        userId
+    );
+
+  /*
+   * Only admin/reviewer can:
+   *
+   * COMPLETED
+   * RETURNED
+   * CLOSED
+   */
+
+  const adminOnlyTransitions:
+    TaskStatus[] = [
+      'COMPLETED',
+      'RETURNED',
+      'CLOSED',
+    ];
+
+  const requiresAdmin =
+    adminOnlyTransitions.includes(
+      newStatus
+    );
+
+  if (
+    requiresAdmin &&
+    !isAdminOrAbove(
+      role
+    )
+  ) {
+    throw new ApiError(
+      403,
+      'Only an admin/reviewer can approve, return, or close a task.'
+    );
+  }
+
+  /*
+   * Submission/resubmission is allowed
+   * by active assignee or admin.
+   */
+
+  if (
+    !requiresAdmin &&
+    !isAssignee &&
+    !isAdminOrAbove(
+      role
+    )
+  ) {
+    throw new ApiError(
+      403,
+      'Only the assignee can submit this task.'
+    );
+  }
+
+  // ==========================================================================
+  // VALIDATE TRANSITION
+  // ==========================================================================
+
+  const allowed =
+    VALID_TRANSITIONS[
+      task.status
+    ] ?? [];
+
+  if (
+    !allowed.includes(
+      newStatus
+    )
+  ) {
+    throw new ApiError(
+      400,
+      `Cannot move task from ${task.status} to ${newStatus}. Valid next steps: ${allowed.join(', ') || 'none'}.`
+    );
+  }
+
+  // ==========================================================================
+  // MOVEMENT ACTION
+  // ==========================================================================
+
+  const actionMap:
+    Partial<
+      Record<
+        TaskStatus,
+        string
+      >
+    > = {
+      SUBMITTED:
+        'SUBMITTED',
+
+      COMPLETED:
+        'APPROVED',
+
+      RETURNED:
+        'RETURNED',
+
+      CLOSED:
+        'CLOSED',
+    };
+
+  // ==========================================================================
+  // UPDATE TASK + MOVEMENT
+  // ==========================================================================
+
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.task.update({
+        where: {
+          id:
+            task.id,
+        },
+
+        data: {
+          status:
+            newStatus,
+
+          completionDate:
+            newStatus ===
+            'COMPLETED'
+              ? new Date()
+              : newStatus ===
+                  'RETURNED'
+                ? null
+                : task.completionDate,
+        },
+      });
+
+      await recordMovementTx(
+        tx,
+        {
+          taskId:
+            task.id,
+
+          actorId:
+            userId,
+
+          action:
+            actionMap[
+              newStatus
+            ] ??
+            'STATUS_CHANGE',
+
+          previousStatus:
+            task.status,
+
+          newStatus,
+
+          remarks,
+        }
+      );
+    }
+  );
+
+  // ==========================================================================
+  // NOTIFICATIONS
+  // ==========================================================================
+
+  if (
+    newStatus ===
+    'RETURNED'
+  ) {
+    await Promise.all(
+      task.assignments.map(
+        (a) =>
+          notify({
+            userId:
+              a.assignedToId,
+
+            type:
+              'TASK_RETURNED',
+
+            title:
+              'Task returned for correction',
+
+            message:
+              remarks ||
+              `"${task.subject}" (${task.fileId}) was returned for correction.`,
+
+            taskId:
+              task.id,
+          })
+      )
+    );
+  }
+
+  else if (
+    newStatus ===
+    'COMPLETED'
+  ) {
+    await notify({
+      userId:
+        task.createdById,
+
+      type:
+        'TASK_APPROVED',
+
+      title:
+        'Task approved',
+
+      message:
+        `"${task.subject}" (${task.fileId}) has been approved and marked complete.`,
+
+      taskId:
+        task.id,
+    });
+  }
+
+  // ==========================================================================
+  // AUDIT
+  // ==========================================================================
+
+  await audit({
+    userId,
+
+    action:
+      'TASK_STATUS_CHANGE',
+
+    entityType:
+      'Task',
+
+    entityId:
+      task.id,
+
+    details:
+      `${task.status} -> ${newStatus}`,
+
+    req,
+  });
+
+  res.json({
+    message:
+      `Task moved to ${newStatus}.`,
+  });
+}
+
+// ============================================================================
+// COMMENTS
+// ============================================================================
+
+const commentSchema =
+  z.object({
+    message:
+      z
+        .string()
+        .min(1),
+  });
+
+export async function addComment(
+  req: AuthedRequest,
+  res: Response
+) {
+  const {
+    message,
+  } =
+    commentSchema.parse(
+      req.body
+    );
+
+  const task =
+    await prisma.task.findUnique({
+      where: {
+        id:
+          req.params.id,
+      },
+    });
+
+  if (!task) {
+    throw new ApiError(
+      404,
+      'Task not found.'
+    );
+  }
+
+  const comment =
+    await prisma.taskComment.create({
+      data: {
+        taskId:
+          task.id,
+
+        userId:
+          req.user!.userId,
+
+        message,
+      },
+
+      include: {
+        user: {
+          select: {
+            id:
+              true,
+
+            name:
+              true,
+          },
+        },
+      },
+    });
+
+  await recordMovement({
+    taskId:
+      task.id,
+
+    actorId:
+      req.user!.userId,
+
+    action:
+      'COMMENT',
+
+    remarks:
+      message.slice(
+        0,
+        140
+      ),
+  });
+
+  res
+    .status(201)
+    .json({
+      comment,
+    });
+}
+
+// ============================================================================
+// PENDING TASK MONITOR
+// ============================================================================
+
+export async function pendingMonitor(
+  req: AuthedRequest,
+  res: Response
+) {
+  if (
+    !isAdminOrAbove(
+      req.user!.role
+    )
+  ) {
+    throw new ApiError(
+      403,
+      'Admins only.'
+    );
+  }
+
+  const staffList =
+    await prisma.user.findMany({
+      where: {
+        status:
+          'ACTIVE',
+      },
+
+      select: {
+        id:
+          true,
+
+        name:
+          true,
+
+        designation:
+          true,
+      },
+    });
+
+  const results =
+    await Promise.all(
+      staffList.map(
+        async (s) => {
+          const assignments =
+            await prisma.taskAssignment.findMany({
+              where: {
+                assignedToId:
+                  s.id,
+
+                active:
+                  true,
+              },
+
+              include: {
+                task: {
+                  select: {
+                    status:
+                      true,
+
+                    dueDate:
+                      true,
+                  },
+                },
+              },
+            });
+
+          const total =
+            assignments.length;
+
+          const completed =
+            assignments.filter(
+              (a) =>
+                a.task.status ===
+                  'COMPLETED' ||
+                a.task.status ===
+                  'CLOSED'
+            ).length;
+
+          /*
+           * In the simplified workflow,
+           * any task that is not COMPLETED/CLOSED
+           * remains pending/actionable.
+           */
+
+          const pending =
+            assignments.filter(
+              (a) =>
+                ![
+                  'COMPLETED',
+                  'CLOSED',
+                ].includes(
+                  a.task.status
+                )
+            ).length;
+
+          const overdue =
+            assignments.filter(
+              (a) =>
+                a.task.dueDate &&
+                a.task.dueDate <
+                  new Date() &&
+                ![
+                  'COMPLETED',
+                  'CLOSED',
+                ].includes(
+                  a.task.status
+                )
+            ).length;
+
+          const oldestPendingDays =
+            assignments
+              .filter(
+                (a) =>
+                  ![
+                    'COMPLETED',
+                    'CLOSED',
+                  ].includes(
+                    a.task.status
+                  )
+              )
+              .map(
+                (a) =>
+                  pendingDays(
+                    a.createdAt
+                  )
+              )
+              .sort(
+                (a, b) =>
+                  b - a
+              )[0];
+
+          return {
+            staff:
+              s,
+
+            total,
+
+            pending,
+
+            completed,
+
+            overdue,
+
+            oldestPendingDays:
+              oldestPendingDays ??
+              0,
+
+            oldestPendingBucket:
+              oldestPendingDays !==
+              undefined
+                ? pendingBucket(
+                    oldestPendingDays
+                  )
+                : null,
+          };
+        }
+      )
+    );
+
+  res.json({
+    monitor:
+      results,
+  });
+}
+
+// ============================================================================
+// TRANSACTION MOVEMENT HELPER
+// ============================================================================
+
 async function recordMovementTx(
-  tx: Prisma.TransactionClient,
+  tx:
+    Prisma.TransactionClient,
+
   params: {
-    taskId: string;
-    actorId: string;
-    action: string;
-    previousStatus?: TaskStatus | null;
-    newStatus?: TaskStatus | null;
-    remarks?: string | null;
-  },
+    taskId:
+      string;
+
+    actorId:
+      string;
+
+    action:
+      string;
+
+    previousStatus?:
+      TaskStatus | null;
+
+    newStatus?:
+      TaskStatus | null;
+
+    remarks?:
+      string | null;
+  }
 ) {
   return tx.taskMovement.create({
     data: {
-      taskId: params.taskId,
-      actorId: params.actorId,
-      action: params.action,
-      previousStatus: params.previousStatus ?? undefined,
-      newStatus: params.newStatus ?? undefined,
-      remarks: params.remarks ?? undefined,
+      taskId:
+        params.taskId,
+
+      actorId:
+        params.actorId,
+
+      action:
+        params.action,
+
+      previousStatus:
+        params.previousStatus ??
+        undefined,
+
+      newStatus:
+        params.newStatus ??
+        undefined,
+
+      remarks:
+        params.remarks ??
+        undefined,
     },
   });
 }
