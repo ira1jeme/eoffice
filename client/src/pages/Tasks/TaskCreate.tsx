@@ -107,14 +107,16 @@ export function TaskCreate() {
       // ---------------------------------------------------------
       // STEP 2: Upload selected attachments
       // ---------------------------------------------------------
-      for (const file of files) {
-        const formData = new FormData();
+for (const file of files) {
+  const formData = new FormData();
 
-        formData.append('file', file);
-        formData.append('taskId', task.id);
+  formData.append('file', file);
 
-        await api.post('/attachments', formData);
-      }
+  await api.post(
+    `/attachments/tasks/${task.id}`,
+    formData
+  );
+}
 
       // ---------------------------------------------------------
       // STEP 3: Open the newly created task
