@@ -44,48 +44,12 @@ const NEXT_STEPS: Partial<
 > = {
   ASSIGNED: [
     {
-      status: 'ACKNOWLEDGED',
-      label: 'Acknowledge',
-    },
-  ],
-
-  ACKNOWLEDGED: [
-    {
-      status: 'IN_PROGRESS',
-      label: 'Start Progress',
-    },
-  ],
-
-  IN_PROGRESS: [
-    {
-      status: 'PENDING',
-      label: 'Mark Pending',
-    },
-    {
       status: 'SUBMITTED',
-      label: 'Submit for Review',
-    },
-  ],
-
-  PENDING: [
-    {
-      status: 'IN_PROGRESS',
-      label: 'Resume Progress',
-    },
-    {
-      status: 'SUBMITTED',
-      label: 'Submit for Review',
+      label: 'Submit Task',
     },
   ],
 
   SUBMITTED: [
-    {
-      status: 'UNDER_REVIEW',
-      label: 'Move to Under Review',
-    },
-  ],
-
-  UNDER_REVIEW: [
     {
       status: 'COMPLETED',
       label: 'Approve & Complete',
@@ -100,8 +64,8 @@ const NEXT_STEPS: Partial<
 
   RETURNED: [
     {
-      status: 'IN_PROGRESS',
-      label: 'Resume Progress',
+      status: 'SUBMITTED',
+      label: 'Resubmit Task',
     },
   ],
 
@@ -109,6 +73,46 @@ const NEXT_STEPS: Partial<
     {
       status: 'CLOSED',
       label: 'Close Task',
+      adminOnly: true,
+    },
+  ],
+
+  /*
+   * Legacy recovery actions.
+   *
+   * These are kept only for tasks already stored in the database
+   * with an old status. They do not appear in the new workflow.
+   */
+  ACKNOWLEDGED: [
+    {
+      status: 'SUBMITTED',
+      label: 'Submit Task',
+    },
+  ],
+
+  IN_PROGRESS: [
+    {
+      status: 'SUBMITTED',
+      label: 'Submit Task',
+    },
+  ],
+
+  PENDING: [
+    {
+      status: 'SUBMITTED',
+      label: 'Submit Task',
+    },
+  ],
+
+  UNDER_REVIEW: [
+    {
+      status: 'COMPLETED',
+      label: 'Approve & Complete',
+      adminOnly: true,
+    },
+    {
+      status: 'RETURNED',
+      label: 'Return for Correction',
       adminOnly: true,
     },
   ],
