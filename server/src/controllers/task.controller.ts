@@ -1215,6 +1215,20 @@ export async function subAssignTask(
     );
   }
 
+  /*
+   * Do not allow a user to sub-assign the task
+   * back to themselves.
+   */
+  if (
+    data.assignedToId ===
+    userId
+  ) {
+    throw new ApiError(
+      400,
+      'You cannot sub-assign a task to yourself.'
+    );
+  }
+
   const assignee =
     await prisma.user.findUnique({
       where: {
@@ -1235,6 +1249,36 @@ export async function subAssignTask(
 
   await prisma.$transaction(
     async (tx) => {
+      /*
+       * PENDENCY TRANSFER
+       *
+       * A sub-assignment transfers responsibility to the
+       * new assignee. Existing assignments are preserved
+       * in history, but are made inactive so they no longer
+       * count as pending against the previous assignee.
+       *
+       * This also guarantees that only the latest assignee
+       * carries the active pendency.
+       */
+      await tx.taskAssignment.updateMany({
+        where: {
+          taskId:
+            task.id,
+
+          active:
+            true,
+        },
+
+        data: {
+          active:
+            false,
+        },
+      });
+
+      /*
+       * Create the new active sub-assignment.
+       * The new assignee now owns the task pendency.
+       */
       await tx.taskAssignment.create({
         data: {
           taskId:
@@ -1258,9 +1302,21 @@ export async function subAssignTask(
 
           isSubAssignment:
             true,
+
+          active:
+            true,
         },
       });
 
+      /*
+       * Keep the task status unchanged.
+       *
+       * Example:
+       * ASSIGNED stays ASSIGNED.
+       * RETURNED stays RETURNED.
+       *
+       * Only responsibility/pendency is transferred.
+       */
       await recordMovementTx(
         tx,
         {
@@ -1274,7 +1330,7 @@ export async function subAssignTask(
             'SUB_ASSIGNED',
 
           remarks:
-            `Sub-assigned to ${assignee.name}`,
+            `Sub-assigned to ${assignee.name}. Pendency transferred to new assignee.`,
         }
       );
     }
@@ -1309,12 +1365,15 @@ export async function subAssignTask(
     entityId:
       task.id,
 
+    details:
+      `Sub-assigned to ${assignee.name}; pendency transferred.`,
+
     req,
   });
 
   res.json({
     message:
-      'Task sub-assigned.',
+      `Task sub-assigned to ${assignee.name}. Pendency transferred to the new assignee.`,
   });
 }
 
