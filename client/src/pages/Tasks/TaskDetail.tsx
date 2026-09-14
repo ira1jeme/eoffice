@@ -1,6 +1,7 @@
 import {
   FormEvent,
   useEffect,
+  useRef,
   useState,
 } from 'react';
 
@@ -26,6 +27,10 @@ import { StatusBadge } from '../../components/Tasks/StatusBadge';
 import { PriorityTag } from '../../components/Tasks/PriorityTag';
 import { MovementTimeline } from '../../components/Tasks/MovementTimeline';
 import { useAuth } from '../../context/AuthContext';
+
+// =========================================================
+// STATUS FLOW
+// =========================================================
 
 const NEXT_STEPS: Partial<
   Record<
@@ -109,12 +114,20 @@ const NEXT_STEPS: Partial<
   ],
 };
 
+// =========================================================
+// PREVIEW TYPE
+// =========================================================
+
 type PreviewFile = {
   id: string;
   fileName: string;
   fileType: string;
   url: string;
 };
+
+// =========================================================
+// COMPONENT
+// =========================================================
 
 export function TaskDetail() {
   const { id } = useParams();
@@ -150,9 +163,9 @@ export function TaskDetail() {
   const [uploading, setUploading] =
     useState(false);
 
-  // =========================================================
-  // DOCUMENT PREVIEW
-  // =========================================================
+  // =======================================================
+  // DOCUMENT PREVIEW STATES
+  // =======================================================
 
   const [previewFile, setPreviewFile] =
     useState<PreviewFile | null>(null);
@@ -160,13 +173,20 @@ export function TaskDetail() {
   const [previewLoading, setPreviewLoading] =
     useState(false);
 
+  /*
+   * Used so the first attachment opens only once
+   * for each task.
+   */
+  const autoPreviewedTaskId =
+    useRef<string | null>(null);
+
   const isAdmin =
     user?.role === 'ADMIN' ||
     user?.role === 'SUPER_ADMIN';
 
-  // =========================================================
+  // =======================================================
   // LOAD TASK
-  // =========================================================
+  // =======================================================
 
   async function load() {
     if (!id) {
@@ -179,14 +199,28 @@ export function TaskDetail() {
     setTask(res.data.task);
   }
 
+  // =======================================================
+  // INITIAL LOAD
+  // =======================================================
+
   useEffect(() => {
+    /*
+     * New task ID means previewing can happen again.
+     */
+    autoPreviewedTaskId.current = null;
+
+    /*
+     * Remove preview from previously opened task.
+     */
+    setPreviewFile(null);
+
     load();
 
     api
       .get('/users/directory')
-      .then((res) =>
-        setStaff(res.data.users)
-      )
+      .then((res) => {
+        setStaff(res.data.users);
+      })
       .catch((err) => {
         console.error(
           'Could not load staff directory:',
@@ -197,20 +231,156 @@ export function TaskDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Revoke blob URL when component is removed.
+  // =======================================================
+  // CLEAN UP OLD PREVIEW URL
+  // =======================================================
+
   useEffect(() => {
+    const url =
+      previewFile?.url;
+
     return () => {
-      if (previewFile?.url) {
-        URL.revokeObjectURL(
-          previewFile.url
-        );
+      if (url) {
+        URL.revokeObjectURL(url);
       }
     };
-  }, [previewFile]);
+  }, [previewFile?.url]);
 
-  // =========================================================
+  // =======================================================
+  // CHECK WHETHER FILE CAN BE PREVIEWED
+  // =======================================================
+
+  function canPreview(
+    fileType: string
+  ) {
+    return (
+      fileType === 'application/pdf' ||
+      fileType === 'image/jpeg' ||
+      fileType === 'image/png' ||
+      fileType === 'video/mp4' ||
+      fileType === 'video/quicktime'
+    );
+  }
+
+  // =======================================================
+  // VIEW DOCUMENT
+  // =======================================================
+
+  async function viewAttachment(
+    attachmentId: string,
+    fileName: string,
+    fileType: string
+  ) {
+    setPreviewLoading(true);
+    setError(null);
+
+    try {
+      const res =
+        await api.get(
+          `/attachments/${attachmentId}/download`,
+          {
+            responseType: 'blob',
+          }
+        );
+
+      const detectedType =
+        fileType ||
+        res.data.type ||
+        'application/octet-stream';
+
+      const blob =
+        new Blob(
+          [res.data],
+          {
+            type: detectedType,
+          }
+        );
+
+      const url =
+        URL.createObjectURL(blob);
+
+      setPreviewFile({
+        id: attachmentId,
+        fileName,
+        fileType: detectedType,
+        url,
+      });
+    } catch (err) {
+      setError(
+        apiErrorMessage(
+          err,
+          'Could not open attachment.'
+        )
+      );
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  // =======================================================
+  // AUTO OPEN FIRST ATTACHMENT
+  // =======================================================
+
+  useEffect(() => {
+    if (!task || !id) {
+      return;
+    }
+
+    /*
+     * Do not automatically open it again
+     * after the user closes the preview.
+     */
+    if (
+      autoPreviewedTaskId.current === id
+    ) {
+      return;
+    }
+
+    const firstPreviewableAttachment =
+      task.attachments.find(
+        (attachment) =>
+          canPreview(
+            attachment.fileType
+          )
+      );
+
+    /*
+     * If no previewable attachment exists,
+     * don't mark task as previewed.
+     *
+     * This allows a newly uploaded attachment
+     * to automatically open later.
+     */
+    if (!firstPreviewableAttachment) {
+      return;
+    }
+
+    autoPreviewedTaskId.current = id;
+
+    void viewAttachment(
+      firstPreviewableAttachment.id,
+      firstPreviewableAttachment.fileName,
+      firstPreviewableAttachment.fileType
+    );
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    task?.id,
+    task?.attachments.length,
+    id,
+  ]);
+
+  // =======================================================
+  // CLOSE PREVIEW
+  // =======================================================
+
+  function closePreview() {
+    setPreviewFile(null);
+  }
+
+  // =======================================================
   // STATUS CHANGE
-  // =========================================================
+  // =======================================================
 
   async function runStatusChange(
     status: TaskStatus
@@ -243,9 +413,9 @@ export function TaskDetail() {
     }
   }
 
-  // =========================================================
-  // COMMENTS
-  // =========================================================
+  // =======================================================
+  // ADD COMMENT / REMARK
+  // =======================================================
 
   async function submitComment(
     e: FormEvent
@@ -282,9 +452,9 @@ export function TaskDetail() {
     }
   }
 
-  // =========================================================
+  // =======================================================
   // SUB ASSIGN
-  // =========================================================
+  // =======================================================
 
   async function submitSubAssign(
     e: FormEvent
@@ -328,9 +498,9 @@ export function TaskDetail() {
     }
   }
 
-  // =========================================================
+  // =======================================================
   // UPLOAD DOCUMENT
-  // =========================================================
+  // =======================================================
 
   async function handleFileUpload(
     e: React.ChangeEvent<HTMLInputElement>
@@ -354,10 +524,24 @@ export function TaskDetail() {
         file
       );
 
+      /*
+       * Do not manually set Content-Type.
+       * Axios/browser will add multipart boundary.
+       */
       await api.post(
         `/attachments/tasks/${id}`,
         formData
       );
+
+      /*
+       * If this task previously had no previewable
+       * attachments, allow newly uploaded file
+       * to auto-open.
+       */
+      if (!previewFile) {
+        autoPreviewedTaskId.current =
+          null;
+      }
 
       await load();
     } catch (err) {
@@ -374,86 +558,9 @@ export function TaskDetail() {
     }
   }
 
-  // =========================================================
-  // VIEW DOCUMENT
-  // =========================================================
-
-  async function viewAttachment(
-    attachmentId: string,
-    fileName: string,
-    fileType: string
-  ) {
-    setPreviewLoading(true);
-    setError(null);
-
-    try {
-      const res =
-        await api.get(
-          `/attachments/${attachmentId}/download`,
-          {
-            responseType: 'blob',
-          }
-        );
-
-      if (previewFile?.url) {
-        URL.revokeObjectURL(
-          previewFile.url
-        );
-      }
-
-      const detectedType =
-        fileType ||
-        res.data.type ||
-        'application/octet-stream';
-
-      const blob =
-        new Blob(
-          [res.data],
-          {
-            type: detectedType,
-          }
-        );
-
-      const url =
-        URL.createObjectURL(
-          blob
-        );
-
-      setPreviewFile({
-        id: attachmentId,
-        fileName,
-        fileType: detectedType,
-        url,
-      });
-    } catch (err) {
-      setError(
-        apiErrorMessage(
-          err,
-          'Could not open attachment.'
-        )
-      );
-    } finally {
-      setPreviewLoading(false);
-    }
-  }
-
-  // =========================================================
-  // CLOSE PREVIEW
-  // =========================================================
-
-  function closePreview() {
-    if (previewFile?.url) {
-      URL.revokeObjectURL(
-        previewFile.url
-      );
-    }
-
-    setPreviewFile(null);
-  }
-
-  // =========================================================
-  // DOWNLOAD DOCUMENT
-  // =========================================================
+  // =======================================================
+  // DOWNLOAD ATTACHMENT
+  // =======================================================
 
   async function downloadAttachment(
     attachmentId: string,
@@ -501,30 +608,9 @@ export function TaskDetail() {
     }
   }
 
-  // =========================================================
-  // CHECK PREVIEWABLE FILE
-  // =========================================================
-
-  function canPreview(
-    fileType: string
-  ) {
-    return (
-      fileType ===
-        'application/pdf' ||
-      fileType ===
-        'image/jpeg' ||
-      fileType ===
-        'image/png' ||
-      fileType ===
-        'video/mp4' ||
-      fileType ===
-        'video/quicktime'
-    );
-  }
-
-  // =========================================================
+  // =======================================================
   // LOADING
-  // =========================================================
+  // =======================================================
 
   if (!task) {
     return (
@@ -534,9 +620,9 @@ export function TaskDetail() {
     );
   }
 
-  // =========================================================
-  // TASK PERMISSIONS
-  // =========================================================
+  // =======================================================
+  // PERMISSIONS
+  // =======================================================
 
   const activeAssignments =
     task.assignments.filter(
@@ -568,16 +654,16 @@ export function TaskDetail() {
         !s.adminOnly
     );
 
-  // =========================================================
+  // =======================================================
   // PAGE
-  // =========================================================
+  // =======================================================
 
   return (
     <div className="space-y-6">
 
-      {/* ==================================================== */}
-      {/* TASK INFORMATION                                    */}
-      {/* ==================================================== */}
+      {/* ================================================= */}
+      {/* TASK INFORMATION                                */}
+      {/* ================================================= */}
 
       <div className="card p-5">
 
@@ -610,6 +696,7 @@ export function TaskDetail() {
         <div className="mt-4 grid grid-cols-2 gap-4 border-t border-border2 pt-4 text-sm sm:grid-cols-4">
 
           <div>
+
             <p className="label mb-0.5">
               Created By
             </p>
@@ -617,14 +704,17 @@ export function TaskDetail() {
             <p className="text-navy-900">
               {task.createdBy.name}
             </p>
+
           </div>
 
           <div>
+
             <p className="label mb-0.5">
               Due Date
             </p>
 
             <p className="text-navy-900">
+
               {task.dueDate
                 ? format(
                     new Date(
@@ -633,10 +723,13 @@ export function TaskDetail() {
                     'dd MMM yyyy'
                   )
                 : '—'}
+
             </p>
+
           </div>
 
           <div>
+
             <p className="label mb-0.5">
               Pending Days
             </p>
@@ -644,14 +737,17 @@ export function TaskDetail() {
             <p className="text-navy-900">
               {task.pendingDays}d
             </p>
+
           </div>
 
           <div>
+
             <p className="label mb-0.5">
               Completion Date
             </p>
 
             <p className="text-navy-900">
+
               {task.completionDate
                 ? format(
                     new Date(
@@ -660,7 +756,9 @@ export function TaskDetail() {
                     'dd MMM yyyy'
                   )
                 : '—'}
+
             </p>
+
           </div>
 
         </div>
@@ -675,8 +773,7 @@ export function TaskDetail() {
               className="file-stamp"
             >
               {
-                task.parentTask
-                  .fileId
+                task.parentTask.fileId
               }
             </Link>
 
@@ -700,9 +797,11 @@ export function TaskDetail() {
                     to={`/tasks/${st.id}`}
                     className="file-stamp"
                   >
+
                     {st.fileId}
                     {' · '}
                     {st.status}
+
                   </Link>
                 )
               )}
@@ -714,15 +813,15 @@ export function TaskDetail() {
 
       </div>
 
-      {/* ==================================================== */}
-      {/* MAIN CONTENT                                        */}
-      {/* ==================================================== */}
+      {/* ================================================= */}
+      {/* MAIN CONTENT                                    */}
+      {/* ================================================= */}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
 
-        {/* ================================================== */}
-        {/* DOCUMENT / PREVIEW COLUMN                         */}
-        {/* ================================================== */}
+        {/* =============================================== */}
+        {/* DOCUMENT / ATTACHMENT COLUMN                  */}
+        {/* =============================================== */}
 
         <div className="space-y-6 lg:col-span-8">
 
@@ -733,13 +832,15 @@ export function TaskDetail() {
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
 
               <div>
+
                 <h3 className="font-display text-base font-semibold text-navy-900">
                   Documents / Attachments
                 </h3>
 
                 <p className="mt-1 text-xs text-slate2-500">
-                  View attached documents directly without downloading.
+                  Attachments are displayed automatically below.
                 </p>
+
               </div>
 
               <label className="btn-secondary cursor-pointer text-center">
@@ -829,9 +930,11 @@ export function TaskDetail() {
                             }
                             className="btn-primary flex-1"
                           >
+
                             {previewLoading
                               ? 'Opening…'
                               : 'View'}
+
                           </button>
                         )}
 
@@ -859,12 +962,31 @@ export function TaskDetail() {
 
           </div>
 
-          {/* ================================================= */}
-          {/* DOCUMENT PREVIEW                                  */}
-          {/* ================================================= */}
+          {/* ============================================= */}
+          {/* LARGE AUTOMATIC PREVIEW                     */}
+          {/* ============================================= */}
 
-          {previewFile ? (
+          {previewLoading &&
+          !previewFile ? (
+            <div className="card flex min-h-[500px] items-center justify-center p-8">
+
+              <div className="text-center">
+
+                <p className="font-display text-base font-semibold text-navy-900">
+                  Opening Attachment…
+                </p>
+
+                <p className="mt-2 text-sm text-slate2-500">
+                  Please wait while the document is loaded.
+                </p>
+
+              </div>
+
+            </div>
+          ) : previewFile ? (
             <div className="card overflow-hidden">
+
+              {/* PREVIEW HEADER */}
 
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border2 px-5 py-3">
 
@@ -877,7 +999,7 @@ export function TaskDetail() {
                   </h3>
 
                   <p className="text-xs text-slate2-500">
-                    Document Preview
+                    Attachment Preview
                   </p>
 
                 </div>
@@ -911,6 +1033,8 @@ export function TaskDetail() {
 
               </div>
 
+              {/* PREVIEW BODY */}
+
               <div className="bg-slate-100 p-2">
 
                 {/* PDF */}
@@ -928,7 +1052,7 @@ export function TaskDetail() {
                   />
                 )}
 
-                {/* JPG / PNG */}
+                {/* JPEG / PNG */}
 
                 {(previewFile.fileType ===
                   'image/jpeg' ||
@@ -949,7 +1073,7 @@ export function TaskDetail() {
                   </div>
                 )}
 
-                {/* VIDEO */}
+                {/* MP4 / MOV */}
 
                 {(previewFile.fileType ===
                   'video/mp4' ||
@@ -964,9 +1088,9 @@ export function TaskDetail() {
                       controls
                       className="max-h-[75vh] max-w-full"
                     >
-                      Your browser does
-                      not support video
-                      playback.
+
+                      Your browser does not support video playback.
+
                     </video>
 
                   </div>
@@ -976,7 +1100,7 @@ export function TaskDetail() {
 
             </div>
           ) : (
-            <div className="card flex min-h-[500px] items-center justify-center p-8">
+            <div className="card flex min-h-[400px] items-center justify-center p-8">
 
               <div className="text-center">
 
@@ -985,7 +1109,7 @@ export function TaskDetail() {
                 </p>
 
                 <p className="mt-2 text-sm text-slate2-500">
-                  Click View on an attachment to display it here.
+                  No previewable attachment is available.
                 </p>
 
               </div>
@@ -995,9 +1119,9 @@ export function TaskDetail() {
 
         </div>
 
-        {/* ================================================== */}
-        {/* RIGHT COLUMN                                      */}
-        {/* ================================================== */}
+        {/* =============================================== */}
+        {/* RIGHT COLUMN                                  */}
+        {/* =============================================== */}
 
         <div className="space-y-6 lg:col-span-4">
 
@@ -1009,9 +1133,9 @@ export function TaskDetail() {
             </div>
           )}
 
-          {/* ================================================ */}
-          {/* TASK MOVEMENT                                    */}
-          {/* ================================================ */}
+          {/* ============================================= */}
+          {/* TASK MOVEMENT                               */}
+          {/* ============================================= */}
 
           <div className="card p-5">
 
@@ -1031,9 +1155,9 @@ export function TaskDetail() {
 
           </div>
 
-          {/* ================================================ */}
-          {/* REMARKS                                         */}
-          {/* ================================================ */}
+          {/* ============================================= */}
+          {/* REMARKS / COMMENTS                          */}
+          {/* ============================================= */}
 
           <div className="card p-5">
 
@@ -1113,9 +1237,9 @@ export function TaskDetail() {
 
           </div>
 
-          {/* ================================================ */}
-          {/* CURRENT ASSIGNMENT                               */}
-          {/* ================================================ */}
+          {/* ============================================= */}
+          {/* CURRENT ASSIGNMENT                          */}
+          {/* ============================================= */}
 
           <div className="card p-5">
 
@@ -1142,8 +1266,7 @@ export function TaskDetail() {
                     <p className="font-medium text-navy-900">
 
                       {
-                        a.assignedTo
-                          .name
+                        a.assignedTo.name
                       }
 
                       {a.isSubAssignment && (
@@ -1160,8 +1283,7 @@ export function TaskDetail() {
                       by{' '}
 
                       {
-                        a.assignedBy
-                          .name
+                        a.assignedBy.name
                       }
 
                       {' · '}
@@ -1191,9 +1313,9 @@ export function TaskDetail() {
 
           </div>
 
-          {/* ================================================ */}
-          {/* ACTIONS                                         */}
-          {/* ================================================ */}
+          {/* ============================================= */}
+          {/* ACTIONS                                     */}
+          {/* ============================================= */}
 
           {nextSteps.length > 0 && (
             <div className="card p-5">
@@ -1244,9 +1366,9 @@ export function TaskDetail() {
             </div>
           )}
 
-          {/* ================================================ */}
-          {/* SUB ASSIGN                                      */}
-          {/* ================================================ */}
+          {/* ============================================= */}
+          {/* SUB ASSIGN                                  */}
+          {/* ============================================= */}
 
           {canSubAssign && (
             <div className="card p-5">
@@ -1266,9 +1388,11 @@ export function TaskDetail() {
                     )
                   }
                 >
+
                   {showSubAssign
                     ? 'Cancel'
                     : 'Sub-assign task'}
+
                 </button>
 
               </div>
